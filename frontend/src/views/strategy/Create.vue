@@ -30,7 +30,7 @@
         <el-form-item label="交易模式">
           <el-radio-group v-model="form.mode">
             <el-radio value="paper">模拟交易</el-radio>
-            <el-radio value="live" disabled>实盘交易(待对接)</el-radio>
+            <el-radio value="live">实盘交易</el-radio>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="策略描述">

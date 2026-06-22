@@ -12,6 +12,7 @@ class OrderCreate(BaseModel):
     quantity: float
     strategy_id: Optional[int] = None
     remark: Optional[str] = ""
+    mode: Optional[str] = None  # paper, live (overrides global config)
 
 
 class OrderCancel(BaseModel):

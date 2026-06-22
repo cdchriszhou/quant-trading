@@ -513,4 +513,5 @@ class DataEngine:
         }
 
 
-data_engine = DataEngine()
+from app.core.config import settings
+data_engine = DataEngine(source=settings.MARKET_DATA_SOURCE)

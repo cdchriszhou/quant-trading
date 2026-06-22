@@ -22,8 +22,19 @@ class TradingEngine:
 
     def place_order(self, db: Session, user_id: int, symbol: str, side: str,
                     order_type: str, quantity: float, price: Optional[float] = None,
-                    strategy_id: Optional[int] = None, remark: str = "") -> Order:
-        """Place a new order."""
+                    strategy_id: Optional[int] = None, remark: str = "",
+                    mode_override: Optional[str] = None) -> Order:
+        """Place a new order. Uses strategy mode if strategy_id provided."""
+        # Determine trade mode
+        trade_mode = settings.TRADING_MODE
+        if mode_override:
+            trade_mode = mode_override
+        elif strategy_id:
+            from app.models.strategy import Strategy
+            strat = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+            if strat:
+                trade_mode = strat.mode
+
         # Get current price if market order
         quote = data_engine.get_realtime_quote(symbol)
         current_price = quote["current_price"]
@@ -38,7 +49,7 @@ class TradingEngine:
             price=order_price,
             quantity=quantity,
             status="pending",
-            trade_mode=settings.TRADING_MODE,
+            trade_mode=trade_mode,
             remark=remark,
         )
         db.add(order)

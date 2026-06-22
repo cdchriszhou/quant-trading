@@ -34,7 +34,8 @@ def place_order(
 
     order = trading_engine.place_order(
         db, current_user.id, req.symbol, req.side, req.order_type,
-        req.quantity, req.price, req.strategy_id, req.remark or ""
+        req.quantity, req.price, req.strategy_id, req.remark or "",
+        mode_override=req.mode,
     )
     return {"data": order.to_dict()}
 

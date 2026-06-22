@@ -24,6 +24,12 @@
           <el-form-item label="备注">
             <el-input v-model="form.remark" placeholder="可选" />
           </el-form-item>
+          <el-form-item label="模式">
+            <el-radio-group v-model="form.mode">
+              <el-radio value="paper">模拟交易</el-radio>
+              <el-radio value="live">实盘交易</el-radio>
+            </el-radio-group>
+          </el-form-item>
           <el-form-item>
             <el-button type="primary" @click="placeOrder" :loading="loading" style="width: 100%">
               提交{{ form.side === 'buy' ? '买入' : '卖出' }}订单
@@ -72,6 +78,7 @@ const form = reactive({
   price: 10,
   quantity: 100,
   remark: '',
+  mode: 'paper',
 })
 
 const accountItems = computed(() => {
