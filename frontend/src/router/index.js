@@ -15,6 +15,7 @@ const routes = [
     children: [
       { path: 'dashboard', name: 'Dashboard', component: () => import('@/views/dashboard/Index.vue') },
       { path: 'market', name: 'Market', component: () => import('@/views/market/Index.vue') },
+      { path: 'market/sectors', name: 'Sectors', component: () => import('@/views/market/Sectors.vue') },
       { path: 'strategies', name: 'Strategies', component: () => import('@/views/strategy/List.vue') },
       { path: 'strategies/create', name: 'CreateStrategy', component: () => import('@/views/strategy/Create.vue') },
       { path: 'strategies/:id', name: 'StrategyDetail', component: () => import('@/views/strategy/Detail.vue') },
@@ -37,7 +38,8 @@ const router = createRouter({
 
 router.beforeEach((to, from, next) => {
   const token = localStorage.getItem('token')
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  let user = {}
+  try { user = JSON.parse(localStorage.getItem('user') || '{}') } catch { user = {} }
 
   if (to.meta.requiresAuth && !token) {
     next('/login')

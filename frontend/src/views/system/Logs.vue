@@ -1,7 +1,8 @@
 <template>
   <el-card shadow="never">
     <template #header><span style="font-weight: bold">操作日志</span></template>
-    <el-table :data="logs" stripe size="small" v-if="logs.length">
+    <div v-if="logs.length" style="overflow-x: auto; -webkit-overflow-scrolling: touch">
+      <el-table :data="logs" stripe size="small">
       <el-table-column prop="created_at" label="时间" width="160" />
       <el-table-column prop="username" label="用户" width="100" />
       <el-table-column prop="action" label="操作" width="140" />
@@ -13,6 +14,7 @@
         </template>
       </el-table-column>
     </el-table>
+    </div>
     <el-empty v-else description="暂无日志" />
   </el-card>
 </template>

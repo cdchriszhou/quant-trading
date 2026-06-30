@@ -8,6 +8,7 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - DB_DRIVER=mysql
       - DB_HOST=mysql
       - DB_PORT=3306
       - DB_USER=root
@@ -23,7 +24,7 @@ services:
         condition: service_started
     volumes:
       - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   frontend:
     image: node:20-alpine

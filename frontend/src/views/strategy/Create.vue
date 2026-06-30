@@ -2,7 +2,7 @@
   <div>
     <el-card shadow="never">
       <template #header><span style="font-weight: bold">创建策略</span></template>
-      <el-form ref="formRef" :model="form" :rules="rules" label-width="120px" style="max-width: 600px">
+      <el-form ref="formRef" :model="form" :rules="rules" label-width="100px" style="max-width: 600px" class="responsive-form">
         <el-form-item label="策略名称" prop="name">
           <el-input v-model="form.name" placeholder="输入策略名称" />
         </el-form-item>
@@ -12,7 +12,10 @@
           </el-select>
         </el-form-item>
         <el-form-item label="交易标的" prop="symbols">
-          <el-select v-model="form.symbols" multiple filterable allow-create default-first-option style="width: 100%" placeholder="搜索或输入股票代码">
+          <el-select v-model="form.symbols" multiple filterable remote
+            :remote-method="remoteSearchSymbols"
+            :loading="symbolLoading"
+            style="width: 100%" placeholder="输入代码搜索，如 000001">
             <el-option v-for="s in symbols" :key="s.code" :label="`${s.code} - ${s.name}`" :value="s.code" />
           </el-select>
         </el-form-item>
@@ -63,11 +66,34 @@ import { useRouter } from 'vue-router'
 import { strategyApi } from '@/api/strategy'
 import { marketApi } from '@/api/market'
 import { ElMessage } from 'element-plus'
+import { paramLabel } from '@/utils/paramLabel'
 
 const router = useRouter()
 const loading = ref(false)
 const types = ref([])
 const symbols = ref([])
+const symbolLoading = ref(false)
+
+// Remote search — calls backend API on each keystroke for live Tencent lookup
+async function remoteSearchSymbols(query) {
+  if (!query || query.trim().length < 2) {
+    // Reload default list on clear
+    try {
+      const res = await marketApi.searchSymbols()
+      symbols.value = res.data || []
+    } catch {}
+    return
+  }
+  symbolLoading.value = true
+  try {
+    const res = await marketApi.searchSymbols(query.trim())
+    symbols.value = res.data || []
+  } catch {
+    symbols.value = []
+  } finally {
+    symbolLoading.value = false
+  }
+}
 
 const form = reactive({
   name: '',
@@ -84,17 +110,6 @@ const rules = {
   name: [{ required: true, message: '请输入策略名称', trigger: 'blur' }],
   strategy_type: [{ required: true, message: '请选择策略类型', trigger: 'change' }],
   symbols: [{ required: true, message: '请选择交易标的', trigger: 'change' }],
-}
-
-function paramLabel(key) {
-  const map = {
-    fast_period: '快线周期', slow_period: '慢线周期', signal_period: '信号周期',
-    period: '计算周期', std_dev: '标准差倍数', grid_levels: '网格层数',
-    grid_spacing_pct: '网格间距(%)', interval_days: '定投间隔(天)',
-    fixed_amount: '定投金额', base_price: '基准价格',
-    signal_type: '信号类型',
-  }
-  return map[key] || key
 }
 
 async function onTypeChange(type) {

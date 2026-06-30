@@ -91,10 +91,12 @@ class RiskEngine:
             return positions + (1 if side == "buy" else 0)
 
         elif rule.rule_type == "daily_loss":
+            from datetime import datetime as dt
+            today_start = dt.utcnow().strftime("%Y-%m-%d")
             today = db.query(Trade).filter(
                 Trade.user_id == user_id,
                 Trade.side == "sell",
-                Trade.trade_time >= "2024-01-01",  # Simplified
+                Trade.trade_time >= today_start,
             ).all()
             daily_loss = sum(abs(t.pnl) for t in today if t.pnl < 0)
             return daily_loss

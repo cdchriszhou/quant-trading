@@ -13,6 +13,8 @@ frontend/dist/
 
 # Database
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
 
 # Runtime
@@ -34,3 +36,8 @@ Thumbs.db
 # Environment
 .env
 backend/.env
+
+# Deploy output
+deploy/
+quant-trading-prod-*.zip
+quant-update.sh

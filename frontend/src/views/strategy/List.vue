@@ -1,21 +1,25 @@
 <template>
   <div>
-    <div style="display: flex; justify-content: space-between; margin-bottom: 16px">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">策略管理</h3>
       <el-button type="primary" @click="$router.push('/strategies/create')">创建策略</el-button>
     </div>
 
     <el-card shadow="never">
-      <el-table :data="strategies" stripe size="small" v-if="strategies.length">
+      <div v-if="strategies.length" style="overflow-x: auto; -webkit-overflow-scrolling: touch">
+        <el-table :data="strategies" stripe size="small">
         <el-table-column prop="name" label="策略名称" min-width="140" />
         <el-table-column prop="strategy_type" label="策略类型" width="100">
           <template #default="{ row }">
             <el-tag>{{ typeLabel(row.strategy_type) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="symbols" label="交易标的" width="140">
+        <el-table-column label="交易标的" width="160">
           <template #default="{ row }">
-            {{ (row.symbols || []).join(', ') }}
+            <div v-for="sn in (row.symbol_names || parseToNames(row.symbols))" :key="sn.code" style="font-size: 12px; margin-bottom: 1px">
+              {{ sn.code.replace('.SZ','').replace('.SH','') }}
+              <span style="color: #9ca3af; font-size: 10px">{{ sn.name }}</span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column prop="mode" label="模式" width="70" />
@@ -49,6 +53,7 @@
           </template>
         </el-table-column>
       </el-table>
+      </div>
       <el-empty v-else description="暂无策略，点击上方按钮创建" />
     </el-card>
   </div>
@@ -58,11 +63,17 @@
 import { ref, onMounted } from 'vue'
 import { strategyApi } from '@/api/strategy'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { getStockName } from '@/utils/stockNames'
 
 const strategies = ref([])
 
-const typeMap = { ma: '均线', macd: 'MACD', bollinger: '布林带', grid: '网格', dca: '定投' }
+const typeMap = { ma: '均线', macd: 'MACD', bollinger: '布林带', grid: '网格', dca: '定投', dragon_pullback: '龙回头', trend_following: '趋势跟踪' }
 function typeLabel(t) { return typeMap[t] || t }
+function parseToNames(symbols) {
+  // Fallback: convert raw symbols list to [{code, name}] format
+  const list = Array.isArray(symbols) ? symbols : []
+  return list.map(s => ({ code: s, name: getStockName(s) }))
+}
 
 async function loadStrategies() {
   try {

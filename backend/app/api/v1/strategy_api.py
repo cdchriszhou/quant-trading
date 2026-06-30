@@ -10,6 +10,7 @@ from app.models.user import User
 from app.models.strategy import Strategy
 from app.schemas.strategy import StrategyCreate, StrategyUpdate
 from app.engine.strategy_engine import strategy_engine
+from app.engine.strategy_executor import strategy_executor
 
 router = APIRouter(prefix="/strategies", tags=["Strategies"])
 
@@ -142,7 +143,10 @@ def start_strategy(
         raise HTTPException(status_code=404, detail="策略不存在")
     strategy.status = "running"
     db.commit()
-    return {"data": strategy.to_dict()}
+    db.refresh(strategy)
+    # Start background execution
+    strategy_executor.start_strategy(strategy.id)
+    return {"data": strategy.to_dict(), "message": "策略已启动"}
 
 
 @router.post("/{strategy_id}/stop")
@@ -159,4 +163,7 @@ def stop_strategy(
         raise HTTPException(status_code=404, detail="策略不存在")
     strategy.status = "stopped"
     db.commit()
-    return {"data": strategy.to_dict()}
+    db.refresh(strategy)
+    # Stop background execution
+    strategy_executor.stop_strategy(strategy.id)
+    return {"data": strategy.to_dict(), "message": "策略已停止"}

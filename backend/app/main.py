@@ -1,6 +1,7 @@
 """Quant Trading System — FastAPI Application Entry Point."""
 
 import asyncio
+import os
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,8 +10,11 @@ from app.core.config import settings
 from app.core.database import init_db, SessionLocal, engine
 from app.core.security import get_password_hash
 from app.models.user import User
-from app.api.v1 import auth, market, strategy_api, trading, backtest, risk, reports, admin
+from app.api.v1 import auth, market, strategy_api, trading, backtest, risk, reports, admin, notifications, env, sector
 from app.engine.data_engine import data_engine
+from app.engine.strategy_executor import strategy_executor
+from app.engine.notification_engine import notification_engine
+from app.core.security import decode_access_token
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -24,7 +28,7 @@ app.add_middleware(
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 app.include_router(auth.router, prefix="/api/v1")
@@ -35,6 +39,9 @@ app.include_router(backtest.router, prefix="/api/v1")
 app.include_router(risk.router, prefix="/api/v1")
 app.include_router(reports.router, prefix="/api/v1")
 app.include_router(admin.router, prefix="/api/v1")
+app.include_router(notifications.router, prefix="/api/v1")
+app.include_router(env.router, prefix="/api/v1")
+app.include_router(sector.router, prefix="/api/v1")
 
 
 class ConnectionManager:
@@ -59,12 +66,61 @@ async def websocket_market(websocket: WebSocket):
         while True:
             symbols = ["000001.SZ", "600519.SH", "000333.SZ", "300750.SZ", "601318.SH"]
             for symbol in symbols:
-                quote = data_engine.get_realtime_quote(symbol)
-                await websocket.send_json({"type": "quote", "data": quote, "timestamp": datetime.now().isoformat()})
+                try:
+                    loop = asyncio.get_running_loop()
+                    quote = await loop.run_in_executor(None, data_engine.get_realtime_quote, symbol)
+                    await websocket.send_json({"type": "quote", "data": quote, "timestamp": datetime.now().isoformat()})
+                except RuntimeError:
+                    # Single quote failure — send error for this symbol, keep going
+                    await websocket.send_json({
+                        "type": "quote",
+                        "data": {"symbol": symbol, "current_price": 0, "error": "fetch_failed", "data_source": "error"},
+                        "timestamp": datetime.now().isoformat(),
+                    })
                 await asyncio.sleep(0.5)
             await asyncio.sleep(1)
-    except (WebSocketDisconnect, Exception):
+    except WebSocketDisconnect:
         manager.disconnect(websocket)
+    except Exception as e:
+        print(f"[WebSocket] Market stream error: {e}")
+        manager.disconnect(websocket)
+
+
+@app.websocket("/ws/notifications")
+async def websocket_notifications(websocket: WebSocket, token: str = ""):
+    """WebSocket endpoint for real-time notification push.
+    Authenticate via query parameter: /ws/notifications?token=<jwt_token>
+    """
+    if not token:
+        await websocket.close(code=4001, reason="Missing token")
+        return
+
+    payload = decode_access_token(token)
+    if payload is None:
+        await websocket.close(code=4001, reason="Invalid or expired token")
+        return
+
+    user_id = payload.get("sub")
+    if user_id is None:
+        await websocket.close(code=4001, reason="Invalid token payload")
+        return
+
+    await websocket.accept()
+    await notification_engine.connect(user_id, websocket)
+    try:
+        # Send a welcome message
+        await websocket.send_json({
+            "type": "connected",
+            "data": {"message": "通知通道已连接", "user_id": user_id},
+        })
+        # Keep connection alive, waiting for client messages or disconnect
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        notification_engine.disconnect(user_id, websocket)
+    except Exception as e:
+        print(f"[WebSocket] Notification error for user {user_id}: {e}")
+        notification_engine.disconnect(user_id, websocket)
 
 
 @app.get("/api/health")
@@ -125,10 +181,46 @@ def _init_database():
         db.close()
 
 
+# ── Production static file serving ──────────────────────────────
+# Set STATIC_DIR env var to the frontend dist/ folder to serve the SPA.
+_static_dir = os.environ.get("STATIC_DIR", "")
+if _static_dir:
+    from fastapi.staticfiles import StaticFiles
+    _static_path = os.path.abspath(_static_dir)
+    if os.path.isdir(_static_path):
+        # Mount /assets/ for JS/CSS (avoids shadowing WebSocket /ws/)
+        assets_dir = os.path.join(_static_path, "assets")
+        if os.path.isdir(assets_dir):
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+        # Catch-all: serve index.html for all unmatched GET requests (SPA routing)
+        from fastapi.responses import FileResponse
+        @app.get("/{path:path}")
+        async def serve_spa(path: str):
+            # Don't intercept API/WebSocket paths
+            if path.startswith("api/") or path.startswith("ws/"):
+                from fastapi.responses import JSONResponse
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            file_path = os.path.join(_static_path, path)
+            if os.path.isfile(file_path):
+                return FileResponse(file_path)
+            return FileResponse(os.path.join(_static_path, "index.html"))
+
+        print(f"[Startup] Serving static files from {_static_path}")
+
+
+
 @app.on_event("startup")
 async def startup():
     _init_database()
+    asyncio.create_task(strategy_executor.startup())
     print("[Startup] Server ready")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await strategy_executor.shutdown()
+    print("[Shutdown] Server stopped")
 
 
 if __name__ == "__main__":

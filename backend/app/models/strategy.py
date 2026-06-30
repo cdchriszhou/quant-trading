@@ -30,6 +30,7 @@ class Strategy(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     def to_dict(self):
+        symbols_list = self.symbols or []
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -37,7 +38,8 @@ class Strategy(Base):
             "description": self.description,
             "strategy_type": self.strategy_type,
             "asset_type": self.asset_type,
-            "symbols": self.symbols or [],
+            "symbols": symbols_list,
+            "symbol_names": self._resolve_symbol_names(symbols_list),
             "parameters": self.parameters or {},
             "time_frame": self.time_frame,
             "status": self.status,
@@ -52,3 +54,18 @@ class Strategy(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+    @staticmethod
+    def _resolve_symbol_names(symbols: list) -> list:
+        """Resolve stock Chinese names via live Tencent quote lookup."""
+        if not symbols:
+            return []
+        try:
+            from app.engine.data_engine import data_engine
+            results = []
+            for sym in symbols:
+                name = data_engine.lookup_stock_name(sym)
+                results.append({"code": sym, "name": name})
+            return results
+        except Exception:
+            return [{"code": s, "name": s} for s in symbols]

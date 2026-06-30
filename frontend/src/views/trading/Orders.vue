@@ -1,9 +1,9 @@
 <template>
   <el-card shadow="never">
     <template #header>
-      <div style="display: flex; justify-content: space-between; align-items: center">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px">
         <span style="font-weight: bold">订单查询</span>
-        <el-radio-group v-model="filterStatus" @change="loadOrders">
+        <el-radio-group v-model="filterStatus" @change="loadOrders" size="small">
           <el-radio-button value="">全部</el-radio-button>
           <el-radio-button value="pending">待成交</el-radio-button>
           <el-radio-button value="filled">已成交</el-radio-button>
@@ -11,9 +11,15 @@
         </el-radio-group>
       </div>
     </template>
-    <el-table :data="orders" stripe size="small">
+    <div style="overflow-x: auto; -webkit-overflow-scrolling: touch">
+      <el-table :data="orders" stripe size="small">
       <el-table-column prop="created_at" label="时间" width="160" />
-      <el-table-column prop="symbol" label="标的" width="90" />
+      <el-table-column label="标的" width="140">
+        <template #default="{ row }">
+          <div style="font-weight: 600; font-size: 12px">{{ row.symbol?.replace('.SZ','').replace('.SH','') }}</div>
+          <div style="color: #9ca3af; font-size: 11px">{{ getStockName(row.symbol) }}</div>
+        </template>
+      </el-table-column>
       <el-table-column prop="side" label="方向" width="70">
         <template #default="{ row }">
           <el-tag :type="row.side === 'buy' ? 'danger' : 'success'" size="small">
@@ -37,6 +43,7 @@
         </template>
       </el-table-column>
     </el-table>
+    </div>
   </el-card>
 </template>
 
@@ -44,6 +51,7 @@
 import { ref, onMounted } from 'vue'
 import { tradingApi } from '@/api/trading'
 import { ElMessage } from 'element-plus'
+import { getStockName } from '@/utils/stockNames'
 
 const orders = ref([])
 const filterStatus = ref('')
@@ -73,5 +81,7 @@ async function cancelOrder(id) {
   }
 }
 
-onMounted(loadOrders)
+onMounted(() => {
+  loadOrders()
+})
 </script>

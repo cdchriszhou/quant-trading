@@ -190,15 +190,21 @@ class TradingEngine:
     def get_account_summary(self, db: Session, user_id: int) -> dict:
         """Get account summary including total equity."""
         from app.models.user import User
+        from app.models.trade import Trade
         user = db.query(User).filter(User.id == user_id).first()
         positions = self.get_positions(db, user_id)
 
         total_market_value = sum(p["market_value"] for p in positions)
         total_unrealized_pnl = sum(p["unrealized_pnl"] for p in positions)
-        total_realized_pnl = sum(p["realized_pnl"] for p in positions)
+
+        # Realized PnL from Trade table (positions may be fully sold & deleted)
+        realized_trades = db.query(Trade).filter(
+            Trade.user_id == user_id,
+            Trade.side == "sell",
+        ).all()
+        total_realized_pnl = sum(t.pnl for t in realized_trades)
 
         # Calculate available cash from trades
-        from app.models.trade import Trade
         trades = db.query(Trade).filter(Trade.user_id == user_id).all()
         total_bought = sum(t.amount + t.commission for t in trades if t.side == "buy")
         total_sold = sum(t.amount - t.commission for t in trades if t.side == "sell")
@@ -209,7 +215,7 @@ class TradingEngine:
         total_return_pct = ((total_equity - user.initial_cash) / user.initial_cash * 100) if user and user.initial_cash else 0
 
         return {
-            "initial_cash": user.initial_cash if user else 0,
+            "initial_cash": float(user.initial_cash) if user else 0,
             "cash_balance": round(cash_balance, 2),
             "market_value": round(total_market_value, 2),
             "total_equity": round(total_equity, 2),

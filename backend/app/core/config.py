@@ -59,8 +59,25 @@ class Settings(BaseSettings):
                           "http://127.0.0.1:8888", "http://localhost:8000"]
 
     # Market data
-    MARKET_DATA_SOURCE: str = "realtime"
+    MARKET_DATA_SOURCE: str = "realtime"  # "realtime" or "simulated"
     TUSHARE_TOKEN: str = ""
+
+    # Market Environment (Core 1)
+    AVG_PRICE_SYMBOL: str = "880003"  # 通达信平均股价指数
+    MARKET_ENV_MA_PERIOD: int = 20  # 20日均线
+    MARKET_ENV_VOL_LOOKBACK: int = 20  # 成交量回溯周期
+    MARKET_ENV_MIN_VOL_RATIO: float = 0.7  # 成交量不创新低的最小比例
+
+    # Sector Filter (Core 2)
+    SECTOR_TOP_N: int = 10  # 只保留前N个多头趋势板块
+    SECTOR_MA_PERIODS: list = [5, 10, 20, 60]  # 行业指数均线周期
+    SECTOR_STRENGTH_LOOKBACK: int = 20  # 板块20日涨跌幅比较周期
+    SECTOR_CACHE_TTL: int = 300  # 板块排名缓存秒数
+
+    # Stock Screener (Core 3)
+    MIN_DAILY_AMOUNT: float = 50_000_000  # 日均成交额最低5000万（流动性门槛）
+    STOCK_SCREENER_MA_PERIODS: list = [5, 10, 20, 60]  # 个股均线周期
+    PULLBACK_NEAR_MA_PCT: float = 2.0  # 回踩接近均线的容忍度(%)
 
     # Trading
     TRADING_MODE: str = "paper"

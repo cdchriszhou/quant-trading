@@ -2,7 +2,7 @@
   <div v-if="strategy">
     <el-card shadow="never" style="margin-bottom: 16px">
       <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px">
           <span style="font-weight: bold">{{ strategy.name }}</span>
           <div>
             <el-button :type="strategy.status === 'running' ? 'warning' : 'success'" @click="toggleStatus">
@@ -12,7 +12,7 @@
           </div>
         </div>
       </template>
-      <el-descriptions :column="3" border size="small">
+      <el-descriptions :column="3" border size="small" class="responsive-descriptions">
         <el-descriptions-item label="策略类型">{{ typeLabel(strategy.strategy_type) }}</el-descriptions-item>
         <el-descriptions-item label="状态">
           <el-tag :type="strategy.status === 'running' ? 'success' : 'info'" size="small">
@@ -37,8 +37,8 @@
     <el-card shadow="never">
       <template #header><span style="font-weight: bold">策略参数</span></template>
       <div v-if="strategy.parameters && Object.keys(strategy.parameters).length">
-        <el-descriptions :column="3" border size="small">
-          <el-descriptions-item v-for="(val, key) in strategy.parameters" :key="key" :label="key">
+        <el-descriptions :column="3" border size="small" class="responsive-descriptions">
+          <el-descriptions-item v-for="(val, key) in strategy.parameters" :key="key" :label="paramLabel(key)">
             {{ val }}
           </el-descriptions-item>
         </el-descriptions>
@@ -54,11 +54,12 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { strategyApi } from '@/api/strategy'
 import { ElMessage } from 'element-plus'
+import { paramLabel } from '@/utils/paramLabel'
 
 const route = useRoute()
 const router = useRouter()
 const strategy = ref(null)
-const typeMap = { ma: '均线', macd: 'MACD', bollinger: '布林带', grid: '网格', dca: '定投' }
+const typeMap = { ma: '均线', macd: 'MACD', bollinger: '布林带', grid: '网格', dca: '定投', dragon_pullback: '龙回头', trend_following: '趋势跟踪' }
 function typeLabel(t) { return typeMap[t] || t }
 
 async function load() {

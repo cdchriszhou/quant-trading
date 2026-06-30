@@ -1,7 +1,7 @@
 <template>
   <div>
     <el-row :gutter="16">
-      <el-col :span="12">
+      <el-col :xs="24" :md="12">
         <el-card shadow="never" style="margin-bottom: 16px">
           <template #header><span style="font-weight: bold">交易绩效</span></template>
           <div v-if="performance" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px">
@@ -13,7 +13,7 @@
           <el-empty v-else description="暂无交易数据" />
         </el-card>
       </el-col>
-      <el-col :span="12">
+      <el-col :xs="24" :md="12">
         <el-card shadow="never" style="margin-bottom: 16px">
           <template #header><span style="font-weight: bold">账户概览</span></template>
           <div v-if="account" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px">
@@ -33,9 +33,15 @@
           <el-button size="small" @click="exportTrades">导出全部</el-button>
         </div>
       </template>
-      <el-table :data="trades" stripe size="small" v-if="trades.length" max-height="400">
+      <div v-if="trades.length" style="overflow-x: auto; -webkit-overflow-scrolling: touch">
+        <el-table :data="trades" stripe size="small" max-height="400">
         <el-table-column prop="trade_time" label="时间" width="160" />
-        <el-table-column prop="symbol" label="标的" width="80" />
+        <el-table-column label="标的" width="130">
+          <template #default="{ row }">
+            <div style="font-weight: 600; font-size: 12px">{{ row.symbol?.replace('.SZ','').replace('.SH','') }}</div>
+            <div style="color: #9ca3af; font-size: 11px">{{ getStockName(row.symbol) }}</div>
+          </template>
+        </el-table-column>
         <el-table-column prop="side" label="方向" width="60">
           <template #default="{ row }">
             <el-tag :type="row.side === 'buy' ? 'danger' : 'success'" size="small">{{ row.side === 'buy' ? '买入' : '卖出' }}</el-tag>
@@ -47,13 +53,14 @@
         <el-table-column prop="commission" label="手续费" width="80" />
         <el-table-column prop="pnl" label="盈亏" width="90">
           <template #default="{ row }">
-            <span :style="{ color: row.pnl > 0 ? '#67c23a' : row.pnl < 0 ? '#f56c6c' : '', fontWeight: 'bold' }">
+            <span :style="{ color: row.pnl > 0 ? '#ef4444' : row.pnl < 0 ? '#10b981' : '', fontWeight: 'bold' }">
               {{ row.pnl || '-' }}
             </span>
           </template>
         </el-table-column>
         <el-table-column prop="trade_mode" label="模式" width="60" />
       </el-table>
+      </div>
       <el-empty v-else description="暂无交易记录" />
     </el-card>
   </div>
@@ -64,6 +71,7 @@ import { ref, computed, onMounted } from 'vue'
 import { reportsApi } from '@/api/reports'
 import { tradingApi } from '@/api/trading'
 import { ElMessage } from 'element-plus'
+import { getStockName } from '@/utils/stockNames'
 
 const trades = ref([])
 const performance = ref(null)

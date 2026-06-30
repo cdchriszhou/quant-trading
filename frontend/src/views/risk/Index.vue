@@ -1,12 +1,13 @@
 <template>
   <div>
-    <div style="display: flex; justify-content: space-between; margin-bottom: 16px">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 10px; flex-wrap: wrap">
       <h3 style="margin: 0">风险控制规则</h3>
       <el-button type="primary" @click="showCreate = true">新增规则</el-button>
     </div>
 
     <el-card shadow="never">
-      <el-table :data="rules" stripe size="small" v-if="rules.length">
+      <div v-if="rules.length" style="overflow-x: auto; -webkit-overflow-scrolling: touch">
+        <el-table :data="rules" stripe size="small">
         <el-table-column prop="name" label="规则名称" width="140" />
         <el-table-column prop="rule_type" label="规则类型" width="130">
           <template #default="{ row }">
@@ -32,6 +33,7 @@
           </template>
         </el-table-column>
       </el-table>
+      </div>
       <el-empty v-else description="暂无风控规则，建议添加规则保障交易安全" />
     </el-card>
 

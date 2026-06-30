@@ -37,7 +37,14 @@ def get_dashboard(
         Trade.user_id == current_user.id,
     ).order_by(Trade.created_at.desc()).limit(10).all()
 
-    overview = data_engine.get_market_overview()
+    try:
+        overview = data_engine.get_market_overview()
+    except RuntimeError as e:
+        overview = {
+            "indices": [],
+            "data_source": "error",
+            "error": str(e),
+        }
 
     return {
         "data": {

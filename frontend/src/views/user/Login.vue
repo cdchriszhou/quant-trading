@@ -1,31 +1,27 @@
 <template>
-  <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #1f2d3d 0%, #324057 100%)">
-    <el-card style="width: 420px; padding: 20px">
-      <div style="text-align: center; margin-bottom: 30px">
-        <el-icon :size="48" color="#409EFF"><TrendCharts /></el-icon>
-        <h2 style="margin-top: 12px; color: #303133">量化交易系统</h2>
-        <p style="color: #909399; font-size: 14px">基于Vue+Python的全流程量化交易平台</p>
+  <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #f0f5f5 0%, #e8f0f0 50%, #f5f6f8 100%)">
+    <el-card style="width: 100%; max-width: 400px; margin: 0 16px; border-radius: 12px; border: 1px solid #e5e7eb">
+      <div style="text-align: center; margin-bottom: 28px">
+        <div style="font-size: 32px; font-weight: 900; color: #00B4B4; letter-spacing: 4px; margin-bottom: 4px">QUANT</div>
+        <div style="font-size: 13px; color: #9ca3af; letter-spacing: 2px">量化交易系统</div>
       </div>
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @keyup.enter="handleLogin">
         <el-form-item label="用户名" prop="username">
-          <el-input v-model="form.username" placeholder="请输入用户名" :prefix-icon="User" />
+          <el-input v-model="form.username" placeholder="请输入用户名" :prefix-icon="User" size="large" />
         </el-form-item>
         <el-form-item label="密码" prop="password">
-          <el-input v-model="form.password" type="password" show-password placeholder="请输入密码" :prefix-icon="Lock" />
+          <el-input v-model="form.password" type="password" show-password placeholder="请输入密码" :prefix-icon="Lock" size="large" />
         </el-form-item>
-        <el-form-item>
-          <el-button type="primary" style="width: 100%" :loading="loading" @click="handleLogin">登 录</el-button>
+        <el-form-item style="margin-top: 8px">
+          <el-button type="primary" style="width: 100%; height: 42px; font-weight: 700; font-size: 15px; letter-spacing: 2px" :loading="loading" @click="handleLogin">登 录</el-button>
         </el-form-item>
         <div style="text-align: center">
           <el-button text type="primary" @click="handleRegister">还没有账号？立即注册</el-button>
         </div>
-        <div style="margin-top: 12px; text-align: center; color: #909399; font-size: 12px">
-          演示账号: admin / admin123
-        </div>
       </el-form>
     </el-card>
 
-    <el-dialog v-model="showRegister" title="注册账号" width="400px">
+    <el-dialog v-model="showRegister" title="注册账号" width="400px" :close-on-click-modal="false">
       <el-form ref="regFormRef" :model="regForm" :rules="regRules" label-position="top">
         <el-form-item label="用户名" prop="username">
           <el-input v-model="regForm.username" placeholder="请输入用户名" />
@@ -59,7 +55,7 @@ const loading = ref(false)
 const regLoading = ref(false)
 const showRegister = ref(false)
 
-const form = reactive({ username: 'admin', password: 'admin123' })
+const form = reactive({ username: '', password: '' })
 const regForm = reactive({ username: '', password: '', confirmPassword: '' })
 
 const rules = {
@@ -92,17 +88,12 @@ async function handleLogin() {
   }
 }
 
-function handleRegister() {
-  showRegister.value = true
-}
+function handleRegister() { showRegister.value = true }
 
 async function handleRegisterSubmit() {
   regLoading.value = true
   try {
-    await authApi.register({
-      username: regForm.username,
-      password: regForm.password,
-    })
+    await authApi.register({ username: regForm.username, password: regForm.password })
     ElMessage.success('注册成功，请登录')
     showRegister.value = false
     form.username = regForm.username
