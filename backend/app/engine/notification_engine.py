@@ -80,8 +80,13 @@ class NotificationEngine:
             db.refresh(notif)
             data = notif.to_dict()
 
-            # Broadcast to connected user(s)
-            asyncio.ensure_future(self.broadcast(user_id, data))
+            # Broadcast to connected user(s) — schedule on running event loop
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.broadcast(user_id, data))
+            except RuntimeError:
+                # No running event loop (e.g. called from sync context)
+                pass
 
             return data
         except Exception as e:

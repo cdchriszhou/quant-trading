@@ -81,6 +81,7 @@ class Settings(BaseSettings):
 
     # Trading
     TRADING_MODE: str = "paper"
+    BROKER_TYPE: str = "paper"  # "paper", "qmt", "xtp", "ptrade", "ctp", "custom"
     DEFAULT_CASH: float = 1000000.0
     COMMISSION_RATE: float = 0.00025
     MIN_COMMISSION: float = 5.0

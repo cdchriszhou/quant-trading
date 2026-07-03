@@ -54,6 +54,8 @@ fi
 # Local mode
 # ──────────────────────────────────────────────
 
+VENV_DIR="$PROJECT_ROOT/backend/.venv"
+
 # ── Check prerequisites ────────────────────────
 log_step "检查环境依赖"
 
@@ -70,12 +72,25 @@ fi
 log_info "node: $(node --version)"
 log_info "npm:  $(npm --version)"
 
-# Check if pip packages are installed
+# Create venv if it doesn't exist
+if [ ! -d "$VENV_DIR" ]; then
+    log_warn "未找到虚拟环境，正在创建..."
+    python3 -m venv "$VENV_DIR"
+    log_info "虚拟环境创建完成"
+fi
+
+# Activate venv
+source "$VENV_DIR/bin/activate"
+log_info "使用虚拟环境: $VENV_DIR"
+
+# Check if pip packages are installed (bypass system proxy that may be down)
 if python3 -c "import fastapi" 2>/dev/null; then
     log_info "Python 依赖已安装"
 else
     log_warn "Python 依赖未安装，正在安装..."
-    pip3 install -r "$PROJECT_ROOT/backend/requirements.txt" -q
+    NO_PROXY="*" no_proxy="*" HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" \
+        http_proxy="" https_proxy="" all_proxy="" \
+        pip install -r "$PROJECT_ROOT/backend/requirements.txt" -q
     log_info "Python 依赖安装完成"
 fi
 
@@ -102,7 +117,7 @@ if [ -f "$RUN_DIR/backend.pid" ]; then
 fi
 
 cd "$PROJECT_ROOT/backend"
-nohup python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 \
+nohup "$VENV_DIR/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 \
     > "$RUN_DIR/backend.log" 2>&1 &
 BACKEND_PID=$!
 echo "$BACKEND_PID" > "$RUN_DIR/backend.pid"

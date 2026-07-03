@@ -61,7 +61,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { tradingApi } from '@/api/trading'
 import { marketApi } from '@/api/market'
 import { riskApi } from '@/api/risk'
@@ -143,9 +143,12 @@ async function loadSymbols() {
 onMounted(() => {
   loadSymbols()
   loadAccount()
-  // Update quote price
-  if (form.symbol) {
-    marketApi.getQuote(form.symbol).then(r => { form.price = r.current_price }).catch(() => {})
-  }
 })
+
+// Auto-update price when symbol changes
+watch(() => form.symbol, (newSymbol) => {
+  if (newSymbol) {
+    marketApi.getQuote(newSymbol).then(r => { form.price = r.current_price }).catch(() => {})
+  }
+}, { immediate: true })
 </script>

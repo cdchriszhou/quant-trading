@@ -6,8 +6,13 @@ export function getSectorRanking(forceRefresh = false, topN = 10) {
 }
 
 /** Get stocks within a sector (optionally screened) */
-export function getSectorStocks(sectorCode, screened = true, limit = 30) {
-  return client.get(`/sectors/${sectorCode}/stocks`, { params: { screened, limit } })
+export function getSectorStocks(sectorCode, screened = true, limit = 30, sectorName = null) {
+  const params = { screened, limit }
+  if (sectorName) params.sector_name = sectorName
+  return client.get(`/sectors/${sectorCode}/stocks`, {
+    params,
+    timeout: 120000,
+  })
 }
 
 /** Get blacklisted weak sectors */

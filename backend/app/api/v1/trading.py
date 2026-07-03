@@ -10,6 +10,7 @@ from app.models.user import User
 from app.schemas.trading import OrderCreate, OrderCancel
 from app.engine.trading_engine import trading_engine
 from app.engine.risk_engine import risk_engine
+from app.engine.data_engine import data_engine
 
 router = APIRouter(prefix="/trading", tags=["Trading"])
 
@@ -20,10 +21,22 @@ def place_order(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Resolve real price for risk check (market orders use live quote)
+    if req.price and req.price > 0:
+        order_price = req.price
+    else:
+        try:
+            quote = data_engine.get_realtime_quote(req.symbol)
+            order_price = quote["current_price"]
+        except RuntimeError:
+            order_price = 0
+
+    order_amount = req.quantity * order_price if order_price > 0 else req.quantity
+
     # Risk check
     risk_result = risk_engine.check_order(
         db, current_user.id, req.symbol, req.side, req.quantity,
-        req.price or 0, req.quantity * (req.price or 1)
+        order_price, order_amount
     )
     if not risk_result["passed"]:
         return {

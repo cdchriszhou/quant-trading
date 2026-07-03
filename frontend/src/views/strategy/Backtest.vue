@@ -152,7 +152,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, nextTick } from 'vue'
+import { ref, reactive, onMounted, nextTick, watch } from 'vue'
 import { strategyApi } from '@/api/strategy'
 import { backtestApi } from '@/api/backtest'
 import { marketApi } from '@/api/market'
@@ -207,6 +207,19 @@ const form = reactive({
 
 const metrics = ref([])
 
+// When strategy type changes, fetch default parameters for that type
+watch(() => form.strategy_type, async (newType) => {
+  try {
+    const res = await strategyApi.getDefaultParams(newType)
+    const params = res.params || res.data?.params || {}
+    if (params && Object.keys(params).length > 0) {
+      form.parameters = { ...params }
+    }
+  } catch (e) {
+    console.error('Failed to load default params for', newType, e)
+  }
+})
+
 const comparisonResult = ref(null)
 
 async function runBacktest() {
@@ -224,12 +237,10 @@ async function runBacktest() {
       comparison_mode: form.comparison_mode,
     }
     const res = await backtestApi.run(payload)
-    // Server envelope: { data: { filtered_result, comparison, unfiltered_result } }
-    // Axios interceptor unwraps response.data → res is { data: { ... } }
-    const body = res.data || res
-    const filtered = body.filtered_result || body
+    // Axios interceptor unwraps response.data → res is top-level API envelope
+    const filtered = res.filtered_result || res.data || res
     result.value = filtered
-    comparisonResult.value = body.comparison || null
+    comparisonResult.value = res.comparison ?? null
 
     const d = filtered
     metrics.value = [

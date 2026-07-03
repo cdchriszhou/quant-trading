@@ -29,9 +29,13 @@ def get_dashboard(
     ).all()
     running_strategies = sum(1 for s in strategies if s.status == "running")
 
-    today_trades = db.query(Trade).filter(
+    # Use proper datetime comparison for today's trades
+    from datetime import timedelta
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_trades = db.query(func.count(Trade.id)).filter(
         Trade.user_id == current_user.id,
-    ).count()
+        Trade.trade_time >= today_start,
+    ).scalar()
 
     recent_trades = db.query(Trade).filter(
         Trade.user_id == current_user.id,
@@ -74,18 +78,26 @@ def get_performance(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    trades = db.query(Trade).filter(
-        Trade.user_id == current_user.id,
-    ).all()
+    """Performance summary — uses SQL aggregation instead of loading all trades."""
+    from sqlalchemy import case
 
-    total_trades = len(trades)
-    buy_trades = len([t for t in trades if t.side == "buy"])
-    sell_trades = len([t for t in trades if t.side == "sell"])
-    total_commission = sum(t.commission for t in trades)
-    total_pnl = sum(t.pnl for t in trades if t.pnl)
+    agg = db.query(
+        func.count(Trade.id).label("total_trades"),
+        func.coalesce(func.sum(case((Trade.side == "buy", 1), else_=0)), 0).label("buy_trades"),
+        func.coalesce(func.sum(case((Trade.side == "sell", 1), else_=0)), 0).label("sell_trades"),
+        func.coalesce(func.sum(Trade.commission), 0).label("total_commission"),
+        func.coalesce(func.sum(Trade.pnl), 0).label("total_pnl"),
+        func.coalesce(func.sum(case((Trade.pnl > 0, 1), else_=0)), 0).label("winning_trades"),
+        func.coalesce(func.sum(case((Trade.pnl < 0, 1), else_=0)), 0).label("losing_trades"),
+    ).filter(Trade.user_id == current_user.id).first()
 
-    winning_trades = len([t for t in trades if t.pnl and t.pnl > 0])
-    losing_trades = len([t for t in trades if t.pnl and t.pnl < 0])
+    total_trades = agg.total_trades
+    buy_trades = int(agg.buy_trades)
+    sell_trades = int(agg.sell_trades)
+    total_commission = float(agg.total_commission)
+    total_pnl = float(agg.total_pnl)
+    winning_trades = int(agg.winning_trades)
+    losing_trades = int(agg.losing_trades)
     win_rate = (winning_trades / (winning_trades + losing_trades) * 100) if (winning_trades + losing_trades) > 0 else 0
 
     account = trading_engine.get_account_summary(db, current_user.id)
@@ -109,8 +121,10 @@ def get_performance(
 def export_trades(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    limit: int = 1000,
 ):
+    """Export all trades (capped at limit)."""
     trades = db.query(Trade).filter(
         Trade.user_id == current_user.id,
-    ).order_by(Trade.created_at.desc()).all()
-    return {"data": [t.to_dict() for t in trades]}
+    ).order_by(Trade.created_at.desc()).limit(limit).all()
+    return {"data": [t.to_dict() for t in trades], "count": len(trades)}

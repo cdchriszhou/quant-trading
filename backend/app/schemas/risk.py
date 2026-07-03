@@ -1,7 +1,7 @@
 """Risk rule schemas."""
 
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
 
 
 class RiskRuleCreate(BaseModel):
@@ -26,7 +26,7 @@ class RiskRuleUpdate(BaseModel):
 
 class RiskCheckRequest(BaseModel):
     symbol: str
-    side: str
-    quantity: float
-    price: float
-    amount: float
+    side: Literal["buy", "sell"]
+    quantity: float = Field(..., gt=0)
+    price: float = Field(..., ge=0)
+    amount: float = Field(..., ge=0)

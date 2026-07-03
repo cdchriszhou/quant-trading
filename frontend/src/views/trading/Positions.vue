@@ -4,7 +4,11 @@
       <template #header><span style="font-weight: bold">持仓查询</span></template>
       <div v-if="positions.length" style="overflow-x: auto; -webkit-overflow-scrolling: touch">
         <el-table :data="positions" stripe size="small">
-        <el-table-column prop="symbol" label="标的" width="100" />
+        <el-table-column prop="symbol" label="标的" width="160">
+          <template #default="{ row }">
+            {{ row.symbol }}<span v-if="row.name" style="color: #909399; margin-left: 4px">{{ row.name }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="quantity" label="持仓数量" width="100" />
         <el-table-column prop="available_quantity" label="可用数量" width="100" />
         <el-table-column prop="avg_cost" label="均价" width="90" />

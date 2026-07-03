@@ -51,6 +51,8 @@ import { ElMessage } from 'element-plus'
 
 const router = useRouter()
 const userStore = useUserStore()
+const formRef = ref(null)
+const regFormRef = ref(null)
 const loading = ref(false)
 const regLoading = ref(false)
 const showRegister = ref(false)
@@ -75,6 +77,9 @@ const regRules = {
 }
 
 async function handleLogin() {
+  const valid = await formRef.value?.validate().catch(() => false)
+  if (!valid) return
+
   loading.value = true
   try {
     const res = await authApi.login(form)
@@ -91,6 +96,9 @@ async function handleLogin() {
 function handleRegister() { showRegister.value = true }
 
 async function handleRegisterSubmit() {
+  const valid = await regFormRef.value?.validate().catch(() => false)
+  if (!valid) return
+
   regLoading.value = true
   try {
     await authApi.register({ username: regForm.username, password: regForm.password })

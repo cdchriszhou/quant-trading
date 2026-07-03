@@ -44,6 +44,30 @@ def create_strategy(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Auto-set initial_capital: use user's remaining cash if not explicitly provided
+    from app.models.trade import Trade
+    from sqlalchemy import func, case
+
+    if req.initial_capital and req.initial_capital > 0:
+        initial_capital = req.initial_capital
+    else:
+        # Calculate remaining cash: initial_cash - bought + sold
+        agg = db.query(
+            func.coalesce(
+                func.sum(case((Trade.side == "buy", Trade.amount + Trade.commission), else_=0)), 0
+            ).label("total_bought"),
+            func.coalesce(
+                func.sum(case((Trade.side == "sell", Trade.amount - Trade.commission), else_=0)), 0
+            ).label("total_sold"),
+        ).filter(Trade.user_id == current_user.id).first()
+
+        total_bought = float(agg.total_bought)
+        total_sold = float(agg.total_sold)
+        initial_capital = max(
+            current_user.initial_cash - total_bought + total_sold,
+            10000,  # minimum 1万
+        )
+
     strategy = Strategy(
         user_id=current_user.id,
         name=req.name,
@@ -54,8 +78,8 @@ def create_strategy(
         parameters=req.parameters or strategy_engine.get_default_params(req.strategy_type),
         time_frame=req.time_frame,
         mode=req.mode,
-        initial_capital=req.initial_capital,
-        current_capital=req.initial_capital,
+        initial_capital=round(initial_capital, 2),
+        current_capital=round(initial_capital, 2),
     )
     db.add(strategy)
     db.commit()

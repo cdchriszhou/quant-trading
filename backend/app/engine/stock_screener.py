@@ -56,6 +56,17 @@ class StockScreener:
                 results.append(screening)
         return results
 
+    def screen_stocks_all(self, symbols: list) -> list:
+        """Screen all symbols and return results with criteria flags (no filtering)."""
+        results = []
+        for sym in symbols:
+            results.append(self.check_criteria(sym))
+        results.sort(
+            key=lambda x: (x.get("criteria_met", False), x.get("buy_signal", False)),
+            reverse=True,
+        )
+        return results
+
     def check_criteria(self, symbol: str, df: pd.DataFrame = None) -> dict:
         """Check all four individual-stock criteria plus right-side signals.
 

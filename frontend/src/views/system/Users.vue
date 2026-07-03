@@ -1,6 +1,14 @@
 <template>
   <el-card shadow="never">
-    <template #header><span style="font-weight: bold">用户管理</span></template>
+    <template #header>
+      <div style="display: flex; justify-content: space-between; align-items: center">
+        <span style="font-weight: bold">用户管理</span>
+        <el-button type="danger" plain size="small" @click="handleReset" :loading="resetting">
+          <el-icon style="margin-right:4px"><WarningFilled /></el-icon>
+          恢复初始设置
+        </el-button>
+      </div>
+    </template>
     <div style="overflow-x: auto; -webkit-overflow-scrolling: touch">
       <el-table :data="users" stripe size="small">
       <el-table-column prop="id" label="ID" width="60" />
@@ -90,14 +98,40 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { adminApi } from '@/api/admin'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { WarningFilled } from '@element-plus/icons-vue'
 
 const users = ref([])
 const dialogVisible = ref(false)
 const saving = ref(false)
+const resetting = ref(false)
 const formRef = ref(null)
 const editingId = ref(null)
 const cashInputs = ref({})
+
+// ── 重置系统 ──
+async function handleReset() {
+  try {
+    await ElMessageBox.confirm(
+      '此操作将删除所有策略、订单、持仓和交易记录（用户账户保留）。此操作不可撤销，确定继续？',
+      '确认重置',
+      { confirmButtonText: '确定重置', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return  // user cancelled
+  }
+
+  resetting.value = true
+  try {
+    const res = await adminApi.reset()
+    const total = res.total_deleted || 0
+    ElMessage.success(`系统已重置，共清除 ${total} 条记录`)
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '重置失败')
+  } finally {
+    resetting.value = false
+  }
+}
 
 function startEditCash(user) {
   editingId.value = user.id

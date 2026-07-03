@@ -116,15 +116,24 @@
         <el-button size="small" @click="loadSectorStocks(selectedSector.sector_code)" :loading="stocksLoading" style="margin-bottom: 8px">
           加载成分股
         </el-button>
-        <div v-if="sectorStocks.length" style="max-height: 400px; overflow-y: auto">
+        <p v-if="stocksMessage" style="font-size: 12px; color: #6b7280; margin-bottom: 8px">{{ stocksMessage }}</p>
+        <div v-if="stocksLoading" style="text-align: center; padding: 16px; color: #9ca3af">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span style="margin-left: 8px; font-size: 12px">正在加载并筛选成分股...</span>
+        </div>
+        <el-empty v-else-if="stocksLoaded && !sectorStocks.length" description="暂无成分股数据" :image-size="60" />
+        <div v-else-if="sectorStocks.length" style="max-height: 400px; overflow-y: auto">
           <div v-for="s in sectorStocks" :key="s.symbol"
             style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #f3f4f6; font-size: 12px">
             <div>
-              <span style="font-weight: 600">{{ s.symbol?.replace('.SZ','').replace('.SH','') }}</span>
+              <span style="font-weight: 600">{{ formatSymbol(s.symbol) }}</span>
               <span style="color: #6b7280; margin-left: 4px">{{ s.name }}</span>
             </div>
             <div style="display: flex; gap: 8px; align-items: center">
-              <span v-if="s.criteria_met !== undefined">
+              <span v-if="s.change_pct != null" :style="{ color: s.change_pct >= 0 ? '#ef4444' : '#10b981', fontWeight: 600 }">
+                {{ s.change_pct >= 0 ? '+' : '' }}{{ s.change_pct }}%
+              </span>
+              <span v-if="s.criteria_met != null">
                 <el-tag :type="s.criteria_met ? 'success' : 'info'" size="small" effect="plain">
                   {{ s.criteria_met ? '合格' : '未达标' }}
                 </el-tag>
@@ -152,6 +161,8 @@ const drawerVisible = ref(false)
 const selectedSector = ref(null)
 const sectorStocks = ref([])
 const stocksLoading = ref(false)
+const stocksLoaded = ref(false)
+const stocksMessage = ref('')
 
 function maAlignType(align) {
   const map = { bullish: 'danger', mixed: 'warning', bearish: 'info', unknown: '' }
@@ -161,6 +172,10 @@ function maAlignType(align) {
 function maAlignLabel(align) {
   const map = { bullish: '多头排列', mixed: '混合', bearish: '空头排列', unknown: '数据不足' }
   return map[align] || align
+}
+
+function formatSymbol(symbol) {
+  return (symbol || '').replace('.SZ', '').replace('.SH', '')
 }
 
 async function loadRanking(forceRefresh = false) {
@@ -181,19 +196,51 @@ async function loadRanking(forceRefresh = false) {
 function showSectorDetail(row) {
   selectedSector.value = row
   sectorStocks.value = []
+  stocksLoaded.value = false
+  stocksMessage.value = ''
   drawerVisible.value = true
 }
 
 async function loadSectorStocks(sectorCode) {
   if (!sectorCode) return
+  const sectorName = selectedSector.value?.sector_name
   stocksLoading.value = true
+  stocksLoaded.value = false
+  stocksMessage.value = ''
+  sectorStocks.value = []
+
   try {
-    const res = await getSectorStocks(sectorCode, true, 30)
-    sectorStocks.value = res.data || []
+    // Phase 1: fast load (quotes only, ~3s)
+    const quick = await getSectorStocks(sectorCode, false, 30, sectorName)
+    if (!quick.data?.length) {
+      stocksMessage.value = quick.message || '未获取到成分股，请稍后重试'
+      return
+    }
+    sectorStocks.value = quick.data
+    stocksMessage.value = quick.message || `已加载 ${quick.data.length} 只成分股，正在筛选...`
+    stocksLoaded.value = true
+    stocksLoading.value = false
+
+    // Phase 2: screening in background (don't wipe list on failure)
+    stocksLoading.value = true
+    try {
+      const screened = await getSectorStocks(sectorCode, true, 30, sectorName)
+      if (screened.data?.length) {
+        sectorStocks.value = screened.data
+        stocksMessage.value = screened.message || `共 ${screened.data.length} 只`
+      }
+    } catch (e) {
+      console.warn('Screening failed, keeping quote list:', e)
+      stocksMessage.value = `已显示 ${sectorStocks.value.length} 只（筛选未完成，可稍后重试）`
+    }
   } catch (e) {
-    ElMessage.error('成分股加载失败')
+    console.error('loadSectorStocks error:', e)
+    const detail = e.response?.data?.detail
+    ElMessage.error(detail || '成分股加载失败')
+    stocksMessage.value = detail || '加载失败，请检查网络后重试'
   } finally {
     stocksLoading.value = false
+    stocksLoaded.value = true
   }
 }
 

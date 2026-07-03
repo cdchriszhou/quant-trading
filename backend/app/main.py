@@ -60,25 +60,75 @@ manager = ConnectionManager()
 
 
 @app.websocket("/ws/market")
-async def websocket_market(websocket: WebSocket):
+async def websocket_market(websocket: WebSocket, token: str = "", symbols: str = ""):
+    """WebSocket market data stream — user-configurable symbol list.
+
+    Usage:
+      /ws/market?token=<jwt>&symbols=000001.SZ,600519.SH,300750.SZ
+      /ws/market?symbols=000001.SZ          (no auth, single symbol)
+      /ws/market                            (default: top 5 major indices)
+
+    With token: subscribes to user's active strategy symbols automatically.
+    Without token: uses explicit symbols param or defaults.
+    """
     await manager.connect(websocket)
+
+    # Determine subscription list
+    if symbols:
+        symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    elif token:
+        payload = decode_access_token(token)
+        if payload:
+            username = payload.get("sub")
+            if username:
+                # Auto-subscribe to user's active strategy symbols
+                from app.models.user import User as UserModel
+                db = SessionLocal()
+                try:
+                    user = db.query(UserModel).filter(UserModel.username == username).first()
+                    if user:
+                        from app.models.strategy import Strategy as StrategyModel
+                        strats = db.query(StrategyModel).filter(
+                            StrategyModel.user_id == user.id,
+                            StrategyModel.is_active == True,
+                        ).all()
+                        sym_set = set()
+                        for s in strats:
+                            for sym in (s.symbols or []):
+                                sym_set.add(sym)
+                        symbol_list = list(sym_set) if sym_set else ["000001.SZ", "600519.SH"]
+                    else:
+                        symbol_list = ["000001.SZ", "600519.SH"]
+                except Exception:
+                    symbol_list = ["000001.SZ", "600519.SH"]
+                finally:
+                    db.close()
+            else:
+                symbol_list = ["000001.SZ", "600519.SH"]
+        else:
+            symbol_list = ["000001.SZ", "600519.SH"]
+    else:
+        # Default: major indices + liquid large-caps
+        symbol_list = ["000001.SZ", "600519.SH", "000333.SZ", "300750.SZ", "601318.SH"]
+
+    print(f"[WebSocket] Market stream started: {len(symbol_list)} symbols")
     try:
         while True:
-            symbols = ["000001.SZ", "600519.SH", "000333.SZ", "300750.SZ", "601318.SH"]
-            for symbol in symbols:
-                try:
-                    loop = asyncio.get_running_loop()
-                    quote = await loop.run_in_executor(None, data_engine.get_realtime_quote, symbol)
-                    await websocket.send_json({"type": "quote", "data": quote, "timestamp": datetime.now().isoformat()})
-                except RuntimeError:
-                    # Single quote failure — send error for this symbol, keep going
+            loop = asyncio.get_running_loop()
+            quotes_map = await loop.run_in_executor(None, data_engine.batch_get_quotes, symbol_list)
+            for symbol in symbol_list:
+                quote = quotes_map.get(symbol)
+                if quote:
+                    await websocket.send_json({
+                        "type": "quote", "data": quote, "timestamp": datetime.now().isoformat()
+                    })
+                else:
                     await websocket.send_json({
                         "type": "quote",
                         "data": {"symbol": symbol, "current_price": 0, "error": "fetch_failed", "data_source": "error"},
                         "timestamp": datetime.now().isoformat(),
                     })
-                await asyncio.sleep(0.5)
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
@@ -100,10 +150,23 @@ async def websocket_notifications(websocket: WebSocket, token: str = ""):
         await websocket.close(code=4001, reason="Invalid or expired token")
         return
 
-    user_id = payload.get("sub")
-    if user_id is None:
+    username = payload.get("sub")
+    if not username:
         await websocket.close(code=4001, reason="Invalid token payload")
         return
+
+    # JWT sub is username; notification_engine keys connections by integer user_id
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.username == username).first()
+    finally:
+        db.close()
+
+    if not user:
+        await websocket.close(code=4001, reason="User not found")
+        return
+
+    user_id = user.id
 
     await websocket.accept()
     await notification_engine.connect(user_id, websocket)
@@ -213,6 +276,16 @@ if _static_dir:
 @app.on_event("startup")
 async def startup():
     _init_database()
+
+    # Initialize broker connection
+    try:
+        from app.brokers import init_broker
+        from app.core.config import settings
+        broker_type = getattr(settings, "BROKER_TYPE", "paper")
+        await init_broker(broker_type)
+    except Exception as e:
+        print(f"[Startup] Broker init skipped (paper mode fallback): {e}")
+
     asyncio.create_task(strategy_executor.startup())
     print("[Startup] Server ready")
 
@@ -220,6 +293,14 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await strategy_executor.shutdown()
+
+    # Disconnect broker
+    try:
+        from app.brokers import get_broker
+        await get_broker().disconnect()
+    except Exception:
+        pass
+
     print("[Shutdown] Server stopped")
 
 

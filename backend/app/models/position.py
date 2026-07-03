@@ -24,12 +24,13 @@ class Position(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
-    def to_dict(self):
+    def to_dict(self, name: str = ""):
         return {
             "id": self.id,
             "user_id": self.user_id,
             "strategy_id": self.strategy_id,
             "symbol": self.symbol,
+            "name": name,
             "quantity": self.quantity,
             "available_quantity": self.available_quantity,
             "avg_cost": self.avg_cost,

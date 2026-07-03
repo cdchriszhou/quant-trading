@@ -33,7 +33,8 @@ class BacktestEngine:
             commission_rate: float = 0.00025, slippage: float = 0.001,
             enable_env_filter: bool = True,
             enable_sector_filter: bool = True,
-            comparison_mode: bool = True) -> dict:
+            comparison_mode: bool = True,
+            risk_rules: list = None) -> dict:
         """Run backtest with optional pre-filtering layers.
 
         When comparison_mode=True, runs twice — with and without filters —
@@ -51,6 +52,7 @@ class BacktestEngine:
         filtered_result = self._run_single(
             strategy_type, parameters, filtered_df, symbols,
             start_date, end_date, initial_capital, commission_rate, slippage,
+            risk_rules=risk_rules,
         )
         filtered_result["filter_info"] = filter_info
 
@@ -69,11 +71,12 @@ class BacktestEngine:
         if comparison_mode and (enable_env_filter or enable_sector_filter):
             unfiltered_df, _ = self._apply_pre_filters(
                 symbols, start_date, end_date,
-                enable_env_filter=False, enable_sector_filter=False,
+                enable_env=False, enable_sector=False,
             )
             unfiltered_result = self._run_single(
                 strategy_type, parameters, unfiltered_df, symbols,
                 start_date, end_date, initial_capital, commission_rate, slippage,
+                risk_rules=risk_rules,
             )
             result["unfiltered_result"] = unfiltered_result
             result["comparison"] = self._compute_comparison(filtered_result, unfiltered_result)
@@ -199,7 +202,8 @@ class BacktestEngine:
     def _run_single(self, strategy_type: str, parameters: dict,
                     df_dict: dict, symbols: list,
                     start_date: str, end_date: str,
-                    initial_capital: float, commission_rate: float, slippage: float) -> dict:
+                    initial_capital: float, commission_rate: float, slippage: float,
+                    risk_rules: list = None) -> dict:
         """Run a single backtest pass on the (potentially pre-filtered) data."""
 
         if not df_dict:
@@ -240,7 +244,7 @@ class BacktestEngine:
             # Simulate trading
             equity_curve, trades, stats = self._simulate(
                 signal_df, initial_capital / max(len(df_dict), 1),
-                commission_rate, slippage,
+                commission_rate, slippage, risk_rules=risk_rules,
             )
             all_equity_curves.append(equity_curve)
             all_trades.extend(trades)
@@ -298,18 +302,32 @@ class BacktestEngine:
         }
 
     def _simulate(self, df: pd.DataFrame, initial_capital: float,
-                  commission_rate: float, slippage: float) -> tuple:
-        """Simulate trading on signal data. Uses t+1 execution to avoid future leakage."""
+                  commission_rate: float, slippage: float,
+                  risk_rules: list = None) -> tuple:
+        """Simulate trading on signal data. Uses t+1 execution to avoid future leakage.
+
+        Args:
+            risk_rules: Optional list of risk rule dicts (from RiskRule model).
+                       Each dict has: rule_type, operator, threshold.
+                       Supported types: order_amount, position_pct, total_stocks,
+                                       daily_loss, max_daily_loss, drawdown.
+        """
 
         capital = initial_capital
         position = 0.0
         avg_entry_price = 0.0
         trades = []
         equity_curve = []
+        risk_violations = []  # track blocked trades
 
         prev_buy_signal = False
         prev_sell_signal = False
         prev_price = 0.0
+
+        # ── Risk state tracking ──
+        daily_loss = 0.0
+        current_date = ""
+        total_stocks_held = 0
 
         for idx, row in df.iterrows():
             price = row["close"]
@@ -317,23 +335,75 @@ class BacktestEngine:
             sell_signal = row.get("sell_signal", False)
             date_str = str(row.get("date", ""))
 
+            # Reset daily loss when date changes
+            if date_str != current_date:
+                daily_loss = 0.0
+                current_date = date_str
+
             # Record equity at current price
             equity = capital + position * price
             equity_curve.append({"date": date_str, "equity": round(equity, 2)})
 
             # Execute signals at t+1 price (avoid future leakage)
-            # Use previous signal, current price
             if prev_buy_signal and capital > 0:
                 buy_amount = capital * 0.95
                 shares = buy_amount / (price * (1 + slippage))
                 cost = shares * price * (1 + slippage)
                 commission = max(cost * commission_rate, 5.0)
                 total_cost = cost + commission
-                if total_cost <= capital:
+
+                # ── Risk check before executing buy ──
+                risk_blocked = False
+                if risk_rules:
+                    portfolio_value = capital + position * price
+                    for rule in risk_rules:
+                        rtype = rule.get("rule_type", "")
+                        op = rule.get("operator", "lt")
+                        threshold = rule.get("threshold", 0)
+
+                        if rtype == "order_amount":
+                            val = total_cost
+                        elif rtype == "position_pct":
+                            new_pos_val = (position + shares) * price
+                            val = (new_pos_val / portfolio_value * 100) if portfolio_value > 0 else 0
+                        elif rtype == "total_stocks":
+                            val = total_stocks_held + 1
+                        elif rtype == "daily_loss":
+                            val = daily_loss
+                        elif rtype == "max_daily_loss":
+                            val = (daily_loss / portfolio_value * 100) if portfolio_value > 0 else 0
+                        elif rtype == "drawdown":
+                            val = ((avg_entry_price - price) / avg_entry_price * 100) if avg_entry_price > 0 and position > 0 else 0
+                        else:
+                            continue
+
+                        # Match risk_engine._check_rule: violation when rule does NOT pass
+                        passed = True
+                        if op == "gt":
+                            passed = val > threshold
+                        elif op == "lt":
+                            passed = val < threshold
+                        elif op == "ge":
+                            passed = val >= threshold
+                        elif op == "le":
+                            passed = val <= threshold
+                        elif op == "eq":
+                            passed = val == threshold
+
+                        if not passed:
+                            risk_violations.append({
+                                "date": date_str, "symbol": "", "rule_type": rtype,
+                                "value": round(val, 2), "threshold": threshold,
+                            })
+                            risk_blocked = True
+                            break
+
+                if not risk_blocked and total_cost <= capital:
                     total_cost_basis = position * avg_entry_price + cost
                     position += shares
                     capital -= total_cost
                     avg_entry_price = total_cost_basis / position if position > 0 else 0
+                    total_stocks_held += 1
                     trades.append({
                         "date": date_str,
                         "side": "buy",
@@ -342,6 +412,17 @@ class BacktestEngine:
                         "amount": round(total_cost, 2),
                         "commission": round(commission, 2),
                         "pnl": 0,
+                    })
+                elif risk_blocked:
+                    trades.append({
+                        "date": date_str,
+                        "side": "buy",
+                        "price": round(price, 2),
+                        "quantity": 0,
+                        "amount": 0,
+                        "commission": 0,
+                        "pnl": 0,
+                        "risk_rejected": True,
                     })
 
             elif prev_sell_signal and position > 0:
@@ -359,8 +440,11 @@ class BacktestEngine:
                     "pnl": round(pnl, 2),
                 })
                 capital += total_received
+                if pnl < 0:
+                    daily_loss += abs(pnl)
                 position = 0.0
                 avg_entry_price = 0.0
+                total_stocks_held = 0
 
             prev_buy_signal = buy_signal
             prev_sell_signal = sell_signal
@@ -371,15 +455,17 @@ class BacktestEngine:
         final_capital = capital + position * final_price
 
         # Stats
-        winning_trades = len([t for t in trades if t["side"] == "sell" and t.get("pnl", 0) > 0])
-        losing_trades = len([t for t in trades if t["side"] == "sell" and t.get("pnl", 0) <= 0])
-        total_sells = winning_trades + losing_trades
+        filled_trades = [t for t in trades if not t.get("risk_rejected")]
+        winning_trades = len([t for t in filled_trades if t["side"] == "sell" and t.get("pnl", 0) > 0])
+        losing_trades = len([t for t in filled_trades if t["side"] == "sell" and t.get("pnl", 0) <= 0])
 
         stats = {
             "final_capital": final_capital,
             "total_trades": len(trades),
             "winning_trades": winning_trades,
             "losing_trades": losing_trades,
+            "risk_violations": risk_violations,
+            "risk_violation_count": len(risk_violations),
         }
 
         return equity_curve, trades, stats

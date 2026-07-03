@@ -15,7 +15,6 @@
       text-color="#6b7280"
       active-text-color="#00B4B4"
       :default-openeds="['market-group', 'strategy', 'trading']"
-      router
       style="border-right: none; margin-top: 8px"
       @select="onMenuSelect"
     >
@@ -91,7 +90,12 @@ function handleLogoClick() {
   emit('nav')
 }
 
-function onMenuSelect() {
+function onMenuSelect(index) {
+  // Only navigate if index looks like a route path (starts with '/')
+  // Sub-menu group indices like "market-group" should only toggle expansion
+  if (index && typeof index === 'string' && index.startsWith('/')) {
+    router.push(index).catch(() => {})
+  }
   emit('nav')
 }
 </script>

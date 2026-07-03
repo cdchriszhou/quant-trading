@@ -236,6 +236,7 @@ const equityChartRef = ref(null)
 let equityChart = null
 let intervalId = null
 let moversIntervalId = null
+let lastDashboardData = null  // saved for chart rendering
 
 // ── Market Environment State ──
 const envStatusText = ref('加载中...')
@@ -305,8 +306,10 @@ async function loadEnvStatus() {
 async function loadMovers() {
   try {
     const res = await marketApi.getTopMovers(10, moverMarket.value)
-    topGainers.value = res.gainers || []
-    topLosers.value = res.losers || []
+    // Handle both wrapped {data: {...}} and unwrapped {...} response formats
+    const body = (res && res.data) || res || {}
+    topGainers.value = body.gainers || []
+    topLosers.value = body.losers || []
   } catch (e) {
     console.error('Top movers error:', e)
   }
@@ -336,6 +339,7 @@ async function loadDashboard() {
     marketIndices.value = data.market?.indices || []
     dataSource.value = data.market?.data_source || 'simulated'
     stats.value = { total_strategies: data.total_strategies || 0, running_strategies: data.running_strategies || 0 }
+    lastDashboardData = data  // save for chart renderer
 
     if (equityChartRef.value) {
       await nextTick()
@@ -347,20 +351,30 @@ async function loadDashboard() {
 }
 
 function renderChart() {
-  if (equityChart) equityChart.dispose()
-  equityChart = echarts.init(equityChartRef.value)
-
-  const dates = []
-  const values = []
-  let eq = 1000000
-  for (let i = 365; i >= 0; i--) {
-    const d = new Date()
-    d.setDate(d.getDate() - i)
-    dates.push(d.toLocaleDateString('zh-CN'))
-    eq = eq * (1 + (Math.random() - 0.48) * 0.008)
-    values.push(Math.round(eq))
+  // Reuse chart instance: only create once, update data with setOption
+  if (!equityChart) {
+    equityChart = echarts.init(equityChartRef.value)
   }
 
+  // Build chart from account data: use current total equity as the latest point
+  // and initial capital as the starting point for a realistic representation.
+  const account = (lastDashboardData && lastDashboardData.account) || {}
+  const initialCapital = account.initial_cash || 1000000
+  const currentEquity = account.total_equity || initialCapital
+
+  // Generate a simple 2-point chart (start -> current) if no history available
+  const dates = []
+  const values = []
+  const today = new Date()
+  const startDate = new Date(today)
+  startDate.setDate(startDate.getDate() - 30)
+  dates.push(startDate.toLocaleDateString('zh-CN'))
+  values.push(Math.round(initialCapital))
+  dates.push(today.toLocaleDateString('zh-CN'))
+  values.push(Math.round(currentEquity))
+
+  // Use notMerge=false for full option replacement on first render, then merge updates
+  const isFirstRender = !equityChart.getOption() || !equityChart.getOption().series
   equityChart.setOption({
     tooltip: { trigger: 'axis' },
     grid: { left: '0', right: '10', top: '10', bottom: '0', containLabel: true },
@@ -380,7 +394,7 @@ function renderChart() {
         ]),
       },
     }],
-  })
+  }, { notMerge: isFirstRender })
 }
 
 onMounted(() => {

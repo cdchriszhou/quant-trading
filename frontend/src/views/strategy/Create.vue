@@ -28,7 +28,14 @@
           </el-select>
         </el-form-item>
         <el-form-item label="初始资金" prop="initial_capital">
-          <el-input-number v-model="form.initial_capital" :min="10000" :step="10000" style="width: 200px" />
+          <el-input-number v-model="form.initial_capital" :min="0" :step="10000" style="width: 200px"
+            :placeholder="`¥${remainingCash.toLocaleString()}`" />
+          <span v-if="form.initial_capital <= 0" style="margin-left: 10px; color: #67c23a; font-size: 13px">
+            ✓ 使用账户余额 ¥{{ remainingCash.toLocaleString() }}
+          </span>
+          <span v-else style="margin-left: 10px; color: #e6a23c; font-size: 13px">
+            ⚠ 自定义金额（账户余额: ¥{{ remainingCash.toLocaleString() }}）
+          </span>
         </el-form-item>
         <el-form-item label="交易模式">
           <el-radio-group v-model="form.mode">
@@ -65,6 +72,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { strategyApi } from '@/api/strategy'
 import { marketApi } from '@/api/market'
+import { tradingApi } from '@/api/trading'
 import { ElMessage } from 'element-plus'
 import { paramLabel } from '@/utils/paramLabel'
 
@@ -73,6 +81,7 @@ const loading = ref(false)
 const types = ref([])
 const symbols = ref([])
 const symbolLoading = ref(false)
+const remainingCash = ref(100000)
 
 // Remote search — calls backend API on each keystroke for live Tencent lookup
 async function remoteSearchSymbols(query) {
@@ -100,7 +109,7 @@ const form = reactive({
   strategy_type: 'ma',
   symbols: [],
   time_frame: '1d',
-  initial_capital: 100000,
+  initial_capital: 0,  // 0 = 自动使用账户剩余资金
   mode: 'paper',
   description: '',
   parameters: {},
@@ -137,14 +146,20 @@ async function handleCreate() {
 
 onMounted(async () => {
   try {
-    const [tRes, sRes] = await Promise.all([
+    const [tRes, sRes, acctRes] = await Promise.all([
       strategyApi.getTypes(),
       marketApi.searchSymbols(),
+      tradingApi.getAccount(),
     ])
     types.value = tRes.data || []
     symbols.value = sRes.data || []
     if (types.value.length) {
       onTypeChange(form.strategy_type)
+    }
+    // 获取账户剩余资金作为参考，初始资金保持 0 由后端自动计算
+    const cash = acctRes.data?.cash_balance
+    if (cash !== undefined && cash > 0) {
+      remainingCash.value = cash
     }
   } catch (e) { console.error(e) }
 })

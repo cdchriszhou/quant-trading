@@ -20,7 +20,24 @@ def run_backtest(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Run a backtest with optional env/sector pre-filtering and comparison mode."""
+    """Run a backtest with optional env/sector pre-filtering and comparison mode.
+
+    Automatically loads the user's enabled risk rules and applies them
+    during simulation so backtest results reflect real risk constraints.
+    """
+    # Load user's enabled risk rules for backtest simulation
+    from app.models.risk_rule import RiskRule
+    risk_rules = []
+    try:
+        rules = db.query(RiskRule).filter(
+            RiskRule.user_id == current_user.id,
+            RiskRule.is_enabled == True,
+        ).all()
+        risk_rules = [{"rule_type": r.rule_type, "operator": r.operator, "threshold": r.threshold}
+                      for r in rules]
+    except Exception:
+        pass  # no risk rules configured → no constraints
+
     result = backtest_engine.run(
         strategy_type=req.strategy_type,
         parameters=req.parameters,
@@ -33,6 +50,7 @@ def run_backtest(
         enable_env_filter=req.enable_env_filter,
         enable_sector_filter=req.enable_sector_filter,
         comparison_mode=req.comparison_mode,
+        risk_rules=risk_rules if risk_rules else None,
     )
 
     if result.get("status") == "failed":
@@ -73,10 +91,13 @@ def run_backtest(
     db.commit()
     db.refresh(bt)
 
-    # Build response with full comparison data
+    # Build response with full comparison data + risk stats
     response = {
         "data": bt.to_dict(),
         "filtered_result": filtered,
+        "risk_rules_applied": len(risk_rules) if risk_rules else 0,
+        "risk_violations": filtered.get("risk_violations", []),
+        "risk_violation_count": filtered.get("risk_violation_count", 0),
     }
     if unfiltered:
         response["unfiltered_result"] = unfiltered

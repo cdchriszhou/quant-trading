@@ -38,10 +38,38 @@ def get_db():
         db.close()
 
 
+def _migrate_schema():
+    """Add missing columns to existing tables (safe for SQLite / MySQL)."""
+    from sqlalchemy import inspect
+
+    # (table, column, SQL type fragment for ADD COLUMN)
+    migrations = [
+        ("orders", "broker_order_id", "VARCHAR(64) DEFAULT ''"),
+    ]
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    for table, column, col_type in migrations:
+        if table not in existing_tables:
+            continue
+        columns = {c["name"] for c in inspector.get_columns(table)}
+        if column in columns:
+            continue
+        ddl = f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+        print(f"[DB] Migrated: added {table}.{column}")
+
+
 def init_db():
-    """Create all tables. Safe to call when DB is unavailable."""
+    """Create all tables and apply lightweight schema migrations."""
     try:
+        # Ensure all models are registered before create_all
+        import app.models  # noqa: F401
+
         Base.metadata.create_all(bind=engine)
+        _migrate_schema()
         # Verify connection
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))

@@ -1,18 +1,18 @@
 """Trading schemas."""
 
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
 
 
 class OrderCreate(BaseModel):
     symbol: str
-    side: str  # buy, sell
-    order_type: str = "market"  # market, limit
-    price: Optional[float] = None
-    quantity: float
+    side: Literal["buy", "sell"]
+    order_type: Literal["market", "limit"] = "market"
+    price: Optional[float] = Field(None, ge=0)
+    quantity: float = Field(..., gt=0)
     strategy_id: Optional[int] = None
     remark: Optional[str] = ""
-    mode: Optional[str] = None  # paper, live (overrides global config)
+    mode: Optional[Literal["paper", "live"]] = None
 
 
 class OrderCancel(BaseModel):

@@ -289,10 +289,13 @@ async function retryLoadSectorStocks() {
 }
 
 function renderKline(data) {
-  if (klineChart) klineChart.dispose()
   if (!data.length) return
 
-  klineChart = echarts.init(klineChartRef.value)
+  // Reuse chart instance: only create once, update data with setOption
+  if (!klineChart) {
+    klineChart = echarts.init(klineChartRef.value)
+  }
+
   const dates = data.map(d => d.date)
   const vols = data.map(d => d.volume)
   const values = data.map(d => [d.open, d.close, d.low, d.high])

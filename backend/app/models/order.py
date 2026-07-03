@@ -20,6 +20,7 @@ class Order(Base):
     status = Column(String(16), default="pending")  # pending, submitted, filled, cancelled, rejected
     commission = Column(Float, default=0.0)
     trade_mode = Column(String(16), default="paper")  # paper, live
+    broker_order_id = Column(String(64), default="")   # broker-assigned order ID for live trading
     remark = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
@@ -38,6 +39,7 @@ class Order(Base):
             "status": self.status,
             "commission": self.commission,
             "trade_mode": self.trade_mode,
+            "broker_order_id": self.broker_order_id or "",
             "remark": self.remark,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

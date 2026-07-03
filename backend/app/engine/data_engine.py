@@ -1,11 +1,56 @@
 """Data Engine: Market data fetching from real Chinese stock APIs."""
 
+import collections
 import datetime
 import time
 from typing import Optional
 
 import pandas as pd
 import httpx
+
+
+class _LRUCache:
+    """Simple LRU cache with TTL support and max size eviction. Thread-safe."""
+
+    def __init__(self, max_size: int = 500):
+        self._cache: dict = {}
+        self._access: collections.OrderedDict = collections.OrderedDict()
+        self._max_size = max_size
+        self._lock = __import__('threading').Lock()
+
+    def get(self, key: str, ttl: float) -> object | None:
+        now = time.time()
+        with self._lock:
+            if key in self._cache:
+                data, ts = self._cache[key]
+                if now - ts < ttl:
+                    # Move to end (most recently used)
+                    self._access.move_to_end(key)
+                    return data
+                # Expired — remove
+                del self._cache[key]
+                del self._access[key]
+            return None
+
+    def set(self, key: str, data):
+        now = time.time()
+        with self._lock:
+            if key in self._cache:
+                # Update existing
+                self._cache[key] = (data, now)
+                self._access.move_to_end(key)
+            else:
+                # Evict oldest if at capacity
+                while len(self._cache) >= self._max_size:
+                    oldest = next(iter(self._access))
+                    del self._cache[oldest]
+                    del self._access[oldest]
+                self._cache[key] = (data, now)
+                self._access[key] = None
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._cache)
 
 
 class DataEngine:
@@ -18,7 +63,7 @@ class DataEngine:
 
     def __init__(self, source: str = "realtime"):
         self.source = source  # kept for compatibility; always uses real APIs
-        self._cache = {}
+        self._cache = _LRUCache(max_size=500)
         self._cache_ttl = {
             "quote": 3,
             "kline": 60,
@@ -26,6 +71,7 @@ class DataEngine:
         }
         self._last_request = 0.0
         self._min_interval = 0.3
+        self._rate_lock = __import__('threading').Lock()
         self._http_client: Optional[httpx.Client] = None
 
         self._symbols = self._build_symbol_list()
@@ -37,14 +83,33 @@ class DataEngine:
     @property
     def http(self) -> httpx.Client:
         if self._http_client is None:
-            self._http_client = httpx.Client(timeout=15, verify=False)
+            # Use connection pooling with keep-alive for better performance
+            # limits: max 20 total connections, max 5 per host
+            limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+            self._http_client = httpx.Client(
+                timeout=15,
+                verify=False,
+                trust_env=False,
+                follow_redirects=True,
+                limits=limits,
+                http2=False,  # Tencent/EastMoney APIs don't support HTTP/2
+            )
         return self._http_client
 
-    def _rate_limit(self):
-        elapsed = time.time() - self._last_request
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_request = time.time()
+    def _rate_limit(self, min_interval: float = None):
+        """Enforce minimum interval between API requests. Accepts override for bulk ops.
+
+        Thread-safe: uses a lock only to compute the wait time, not during sleep,
+        so parallel callers (e.g. sector K-line fetch) can overlap HTTP I/O while
+        still maintaining a minimum gap between request starts.
+        """
+        interval = min_interval if min_interval is not None else self._min_interval
+        with self._rate_lock:
+            elapsed = time.time() - self._last_request
+            wait = max(0.0, interval - elapsed)
+            self._last_request = time.time() + wait
+        if wait > 0:
+            time.sleep(wait)
 
     # ── Symbol format conversion ─────────────────────────────────
 
@@ -68,15 +133,10 @@ class DataEngine:
     # ── Cache helpers ────────────────────────────────────────────
 
     def _cache_get(self, key: str, ttl_key: str = "quote"):
-        now = time.time()
-        if key in self._cache:
-            data, ts = self._cache[key]
-            if now - ts < self._cache_ttl.get(ttl_key, 10):
-                return data
-        return None
+        return self._cache.get(key, self._cache_ttl.get(ttl_key, 10))
 
     def _cache_set(self, key: str, data):
-        self._cache[key] = (data, time.time())
+        self._cache.set(key, data)
 
     # ── Public API ───────────────────────────────────────────────
 
@@ -87,6 +147,79 @@ class DataEngine:
             raise RuntimeError(f"Failed to fetch real-time quote for {symbol}")
         q["data_source"] = "realtime"
         return q
+
+    def batch_get_quotes(self, symbols: list, max_batch: int = 50) -> dict:
+        """Batch-fetch real-time quotes for multiple symbols.
+
+        Uses Tencent's batch API (supports ~50 symbols per request).
+        Returns a dict mapping symbol -> quote dict (or empty dict on failure).
+
+        This avoids N sequential HTTP requests when fetching quotes for
+        multiple positions/symbols at once.
+        """
+        if not symbols:
+            return {}
+
+        all_quotes = {}
+        batch_size = max_batch
+
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            tcodes = [self._to_tencent(s) for s in batch]
+            url = f"http://qt.gtimg.cn/q={','.join(tcodes)}"
+            try:
+                self._rate_limit()
+                resp = self.http.get(url)
+                for line in resp.text.strip().split("\n"):
+                    if "=" not in line or "pv_none" in line:
+                        continue
+                    # Extract the tcode from the line (format: v_tcode="...")
+                    eq_pos = line.index("=")
+                    v_prefix = line[:eq_pos]
+                    tcode = v_prefix[2:] if v_prefix.startswith("v_") else v_prefix
+                    raw = line[eq_pos + 1:].strip().strip('"').strip(";")
+                    fields = raw.split("~")
+                    if len(fields) < 35:
+                        continue
+                    try:
+                        name = fields[1]
+                        raw_code = fields[2]
+                        price = float(fields[3]) if fields[3] else 0
+                        pre_close = float(fields[4]) if fields[4] else 0
+                        open_price = float(fields[5]) if fields[5] else 0
+                        volume = int(float(fields[6])) if fields[6] else 0
+                        high = float(fields[33]) if len(fields) > 33 and fields[33] else price
+                        low = float(fields[34]) if len(fields) > 34 and fields[34] else price
+                        change_pct = round((price - pre_close) / pre_close * 100, 2) if pre_close else 0
+                        amount = round(volume * price / 1e8, 2)
+
+                        # Map back to standard symbol format
+                        if raw_code.startswith(("6", "68")):
+                            sym = f"{raw_code}.SH"
+                        else:
+                            sym = f"{raw_code}.SZ"
+
+                        all_quotes[sym] = {
+                            "symbol": sym,
+                            "name": name,
+                            "current_price": price,
+                            "open": round(open_price, 2),
+                            "high": round(high, 2),
+                            "low": round(low, 2),
+                            "pre_close": round(pre_close, 2),
+                            "change": round(price - pre_close, 2),
+                            "change_pct": change_pct,
+                            "volume": volume,
+                            "amount": amount,
+                            "data_source": "realtime",
+                        }
+                    except (ValueError, IndexError):
+                        continue
+            except Exception as e:
+                print(f"[DataEngine] Batch quote error: {e}")
+                # Continue to next batch on error
+
+        return all_quotes
 
     def get_kline_data(self, symbol: str, period: str = "1d", count: int = 100) -> list:
         """Get K-line data from East Money."""
@@ -107,6 +240,8 @@ class DataEngine:
     def generate_fallback_quote(self, symbol: str) -> dict | None:
         """Generate simulated real-time quote when external APIs are unreachable."""
         import random
+        # Use a local Random instance to avoid corrupting the global random state
+        rng = random.Random(hash(symbol) % (2**31))
         # Look up the stock name from cache
         name = symbol
         for s in self._symbols:
@@ -114,16 +249,14 @@ class DataEngine:
                 name = s["name"]
                 break
 
-        # Seed by symbol for consistent prices
-        random.seed(hash(symbol) % (2**31))
-        base_price = 10.0 + random.random() * 90  # 10-100
+        base_price = 10.0 + rng.random() * 90  # 10-100
         volatility = 0.02
-        change_pct = round((random.random() - 0.48) * 6, 2)  # -3% ~ +3%
+        change_pct = round((rng.random() - 0.48) * 6, 2)  # -3% ~ +3%
         current_price = round(base_price * (1 + change_pct / 100), 2)
         pre_close = round(current_price / (1 + change_pct / 100), 2)
-        high = round(max(current_price, pre_close) * (1 + random.random() * 0.02), 2)
-        low = round(min(current_price, pre_close) * (1 - random.random() * 0.02), 2)
-        volume = int(5_000_000 + random.random() * 45_000_000)
+        high = round(max(current_price, pre_close) * (1 + rng.random() * 0.02), 2)
+        low = round(min(current_price, pre_close) * (1 - rng.random() * 0.02), 2)
+        volume = int(5_000_000 + rng.random() * 45_000_000)
 
         return {
             "symbol": symbol,
@@ -143,15 +276,16 @@ class DataEngine:
     def generate_fallback_kline(self, symbol: str, period: str = "1d", count: int = 100) -> list | None:
         """Generate simulated K-line data when external APIs are unreachable."""
         import random
-        random.seed(hash(symbol) % (2**31))
+        # Use a local Random instance to avoid corrupting the global random state
+        rng = random.Random(hash(symbol) % (2**31))
 
-        base_price = 10.0 + random.random() * 90
-        drift = 0.0002 + random.random() * 0.0003
-        volatility = 0.015 + random.random() * 0.015
+        base_price = 10.0 + rng.random() * 90
+        drift = 0.0002 + rng.random() * 0.0003
+        volatility = 0.015 + rng.random() * 0.015
 
         prices = [base_price]
         for _ in range(count):
-            prices.append(prices[-1] * (1 + drift + volatility * (random.random() * 2 - 1)))
+            prices.append(prices[-1] * (1 + drift + volatility * (rng.random() * 2 - 1)))
 
         klines = []
         today = datetime.datetime.now()
@@ -167,11 +301,11 @@ class DataEngine:
                 # For minute periods, space evenly and include time
                 delta = datetime.timedelta(minutes=(count - i) * 30)
                 date_str = (today - delta).strftime("%Y-%m-%d %H:%M")
-            vol_factor = 1.0 + (random.random() - 0.5) * 3
-            open_p = round(close * (1 + (random.random() - 0.5) * 0.02), 2)
-            high = round(max(open_p, close) * (1 + random.random() * 0.015), 2)
-            low = round(min(open_p, close) * (1 - random.random() * 0.015), 2)
-            volume = int(5_000_000 + random.random() * 45_000_000 * vol_factor)
+            vol_factor = 1.0 + (rng.random() - 0.5) * 3
+            open_p = round(close * (1 + (rng.random() - 0.5) * 0.02), 2)
+            high = round(max(open_p, close) * (1 + rng.random() * 0.015), 2)
+            low = round(min(open_p, close) * (1 - rng.random() * 0.015), 2)
+            volume = int(5_000_000 + rng.random() * 45_000_000 * vol_factor)
             klines.append({
                 "date": date_str,
                 "open": open_p,
@@ -188,7 +322,8 @@ class DataEngine:
     def _generate_mock_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """Generate simulated historical data when real API is unavailable."""
         import random
-        random.seed(hash(symbol) % (2**31))
+        # Use a local Random instance to avoid corrupting the global random state
+        rng = random.Random(hash(symbol) % (2**31))
 
         start = datetime.datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.datetime.strptime(end_date, "%Y-%m-%d")
@@ -207,11 +342,11 @@ class DataEngine:
             return pd.DataFrame()
 
         # Generate a realistic random-walk price series
-        base_price = 10.0 + random.random() * 90  # 10-100 initial
-        drift = 0.0002 + random.random() * 0.0003  # slight upward bias
-        volatility = 0.015 + random.random() * 0.015  # 1.5%-3% daily vol
+        base_price = 10.0 + rng.random() * 90  # 10-100 initial
+        drift = 0.0002 + rng.random() * 0.0003  # slight upward bias
+        volatility = 0.015 + rng.random() * 0.015  # 1.5%-3% daily vol
 
-        returns = [drift + volatility * (random.random() * 2 - 1) for _ in range(n)]
+        returns = [drift + volatility * (rng.random() * 2 - 1) for _ in range(n)]
         prices = [base_price]
         for r in returns[1:]:
             prices.append(prices[-1] * (1 + r))
@@ -219,11 +354,11 @@ class DataEngine:
         rows = []
         for i, d in enumerate(dates):
             close = round(prices[i], 2)
-            vol_factor = 1.0 + (random.random() - 0.5) * 3
-            open_p = round(close * (1 + (random.random() - 0.5) * 0.02), 2)
-            high = round(max(open_p, close) * (1 + random.random() * 0.015), 2)
-            low = round(min(open_p, close) * (1 - random.random() * 0.015), 2)
-            volume = int(5_000_000 + random.random() * 45_000_000 * vol_factor)
+            vol_factor = 1.0 + (rng.random() - 0.5) * 3
+            open_p = round(close * (1 + (rng.random() - 0.5) * 0.02), 2)
+            high = round(max(open_p, close) * (1 + rng.random() * 0.015), 2)
+            low = round(min(open_p, close) * (1 - rng.random() * 0.015), 2)
+            volume = int(5_000_000 + rng.random() * 45_000_000 * vol_factor)
             rows.append({
                 "date": d, "open": open_p, "close": close,
                 "high": high, "low": low, "volume": volume,
@@ -471,8 +606,8 @@ class DataEngine:
             return self._industry_map
 
         industry_map: dict[str, list[str]] = {}
-        page_size = 200
-        max_pages = 30
+        page_size = 500  # Larger page size → fewer HTTP requests (~11 vs ~28)
+        max_pages = 15
 
         for page in range(1, max_pages + 1):
             url = (
@@ -482,11 +617,12 @@ class DataEngine:
                 f"&fields=f12,f100"
             )
             try:
-                self._rate_limit()
+                # East Money is more generous with rate limits — use 0.1s for bulk ops
+                self._rate_limit(min_interval=0.1)
                 resp = self.http.get(url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                     "Referer": "https://quote.eastmoney.com/",
-                })
+                }, timeout=10)
                 data = resp.json()
                 items = data.get("data", {}).get("diff", [])
                 if not items:
@@ -549,56 +685,123 @@ class DataEngine:
 
         return None
 
-    def get_sector_stocks(self, board_code: str, count: int = 100) -> list:
-        """Fetch constituent stocks for a given sector/board code.
+    def _build_sina_industry_map(self) -> dict[str, str]:
+        """Build Sina Finance industry name → node code map (fallback data source)."""
+        if hasattr(self, "_sina_industry_map") and self._sina_industry_map:
+            return self._sina_industry_map
 
-        Uses East Money industry classification to find stocks in the sector,
-        then batches real-time quotes from Tencent.
+        import json
 
-        Args:
-            board_code: The board code (e.g. "pt01801084").
-            count: Max stocks to return (default 100).
-
-        Returns a list of stocks sorted by change_pct descending, each containing:
-        {code, name, price, change_pct, volume, amount, high, low, open, pre_close}
-        """
-        cache_key = f"sector_stocks_{board_code}_{count}"
-        cached = self._cache_get(cache_key, "index")
-        if cached:
-            return cached
-
-        # Step 1: Get sector name from the board code
-        sector_name = None
+        industry_map: dict[str, str] = {}
+        url = (
+            "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            "Market_Center.getHQNodes"
+        )
         try:
-            sectors = self.get_sectors(100)  # get all sectors
-            for s in sectors:
-                if s.get("code") == board_code:
-                    sector_name = s.get("name", "")
+            self._rate_limit(min_interval=0.2)
+            resp = self.http.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Referer": "https://finance.sina.com.cn/",
+            }, timeout=15)
+            data = json.loads(resp.text)
+
+            def walk(node):
+                if not isinstance(node, list):
+                    return
+                if (
+                    len(node) >= 3
+                    and isinstance(node[0], str)
+                    and isinstance(node[2], str)
+                    and node[2].startswith("new_")
+                ):
+                    industry_map[node[0]] = node[2]
+                for child in node:
+                    walk(child)
+
+            walk(data)
+            if industry_map:
+                self._sina_industry_map = industry_map
+                print(f"[DataEngine] Sina industry map built: {len(industry_map)} industries")
+        except Exception as e:
+            print(f"[DataEngine] Sina industry map failed: {e}")
+
+        return industry_map
+
+    @staticmethod
+    def _sina_symbol_to_code(sina_symbol: str) -> str:
+        """Convert Sina symbol (e.g. sh600519) to 600519.SH."""
+        sym = (sina_symbol or "").lower()
+        if sym.startswith("sh") and len(sym) >= 8:
+            return f"{sym[2:]}.SH"
+        if sym.startswith("sz") and len(sym) >= 8:
+            return f"{sym[2:]}.SZ"
+        if sym.startswith("bj") and len(sym) >= 8:
+            return f"{sym[2:]}.BJ"
+        return sina_symbol
+
+    def _fetch_sina_industry_stocks(self, node: str, count: int = 100) -> list:
+        """Fetch constituent stocks for a Sina industry node with basic quote fields."""
+        stocks: list[dict] = []
+        page = 1
+        page_size = 80
+
+        while len(stocks) < count:
+            url = (
+                "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                f"Market_Center.getHQNodeData?page={page}&num={page_size}"
+                f"&sort=changepercent&asc=0&node={node}"
+            )
+            try:
+                self._rate_limit(min_interval=0.2)
+                resp = self.http.get(url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Referer": "https://finance.sina.com.cn/",
+                }, timeout=15)
+                items = resp.json()
+                if not items:
                     break
-        except Exception:
-            pass
 
-        if not sector_name:
-            print(f"[DataEngine] Sector not found for board_code: {board_code}")
-            return []
+                for item in items:
+                    code = self._sina_symbol_to_code(str(item.get("symbol", "")))
+                    if not code or len(code) < 9:
+                        continue
+                    try:
+                        price = float(item.get("trade") or 0)
+                    except (TypeError, ValueError):
+                        price = 0.0
+                    try:
+                        change_pct = float(item.get("changepercent") or 0)
+                    except (TypeError, ValueError):
+                        change_pct = 0.0
+                    pre_close = round(price / (1 + change_pct / 100), 2) if price and change_pct else price
 
-        # Step 2: Build industry map and find matching stocks
-        industry_map = self._build_industry_map()
-        if not industry_map:
-            print("[DataEngine] Industry map is empty, cannot get sector stocks")
-            return []
+                    stocks.append({
+                        "code": code,
+                        "name": str(item.get("name", "")),
+                        "price": round(price, 2),
+                        "change_pct": round(change_pct, 2),
+                        "volume": 0,
+                        "amount": 0.0,
+                        "high": round(price, 2),
+                        "low": round(price, 2),
+                        "open": round(price, 2),
+                        "pre_close": pre_close,
+                    })
+                    if len(stocks) >= count:
+                        break
 
-        matched_industry = self._match_industry(sector_name, list(industry_map.keys()))
-        if not matched_industry:
-            print(f"[DataEngine] No matching industry for sector: {sector_name}")
-            return []
+                if len(items) < page_size:
+                    break
+                page += 1
+            except Exception as e:
+                print(f"[DataEngine] Sina node stocks page {page} failed: {e}")
+                break
 
-        stock_codes = industry_map.get(matched_industry, [])[:count]
-        if not stock_codes:
-            print(f"[DataEngine] No stocks found for industry: {matched_industry}")
-            return []
+        stocks.sort(key=lambda x: x["change_pct"], reverse=True)
+        return stocks[:count]
 
-        # Step 3: Batch-query real-time quotes
+    def _batch_tencent_quotes(self, stock_codes: list) -> list:
+        """Batch-fetch real-time quotes from Tencent for a list of stock codes."""
         stocks = []
         batch_size = 50
         for i in range(0, len(stock_codes), batch_size):
@@ -617,7 +820,7 @@ class DataEngine:
                         continue
                     try:
                         name = fields[1]
-                        raw_code = fields[2]  # 6-digit code like "000001"
+                        raw_code = fields[2]
                         price = float(fields[3]) if fields[3] else 0
                         pre_close = float(fields[4]) if fields[4] else 0
                         open_price = float(fields[5]) if fields[5] else 0
@@ -627,7 +830,6 @@ class DataEngine:
                         change_pct = round((price - pre_close) / pre_close * 100, 2) if pre_close else 0
                         amount = round(volume * price / 1e8, 2)
 
-                        # Build full symbol from 6-digit code
                         if raw_code.startswith(("6", "68")):
                             symbol = f"{raw_code}.SH"
                         else:
@@ -652,9 +854,70 @@ class DataEngine:
                 continue
             time.sleep(0.3)
 
-        # Sort by change_pct descending
         stocks.sort(key=lambda x: x["change_pct"], reverse=True)
+        return stocks
 
+    def _fetch_sector_stocks_by_name(self, sector_name: str, count: int) -> list:
+        """Fetch sector constituent stocks via East Money, with Sina fallback."""
+        industry_map = self._build_industry_map()
+        if industry_map:
+            matched = self._match_industry(sector_name, list(industry_map.keys()))
+            if matched:
+                codes = industry_map.get(matched, [])[:count]
+                if codes:
+                    stocks = self._batch_tencent_quotes(codes)
+                    if stocks:
+                        return stocks
+
+        sina_map = self._build_sina_industry_map()
+        if sina_map:
+            matched = self._match_industry(sector_name, list(sina_map.keys()))
+            if matched:
+                stocks = self._fetch_sina_industry_stocks(sina_map[matched], count)
+                if stocks:
+                    print(f"[DataEngine] Sector stocks via Sina: {sector_name} → {matched}")
+                    return stocks
+
+        print(f"[DataEngine] No stocks resolved for sector: {sector_name}")
+        return []
+
+    def get_sector_stocks(
+        self, board_code: str, count: int = 100, sector_name: str | None = None
+    ) -> list:
+        """Fetch constituent stocks for a given sector/board code.
+
+        Uses East Money industry classification (Sina Finance as fallback) to find
+        stocks in the sector, then batches real-time quotes from Tencent when possible.
+
+        Args:
+            board_code: The board code (e.g. "pt01801084").
+            count: Max stocks to return (default 100).
+            sector_name: Optional sector display name (avoids extra lookup).
+
+        Returns a list of stocks sorted by change_pct descending, each containing:
+        {code, name, price, change_pct, volume, amount, high, low, open, pre_close}
+        """
+        cache_key = f"sector_stocks_{board_code}_{count}"
+        cached = self._cache_get(cache_key, "index")
+        if cached:
+            return cached
+
+        # Step 1: Resolve sector name
+        if not sector_name:
+            try:
+                sectors = self.get_sectors(100)
+                for s in sectors:
+                    if s.get("code") == board_code:
+                        sector_name = s.get("name", "")
+                        break
+            except Exception:
+                pass
+
+        if not sector_name:
+            print(f"[DataEngine] Sector not found for board_code: {board_code}")
+            return []
+
+        stocks = self._fetch_sector_stocks_by_name(sector_name, count)
         self._cache_set(cache_key, stocks)
         return stocks
 
@@ -1129,8 +1392,8 @@ class DataEngine:
         Returns list of {"code": "000001.SZ", "name": "平安银行", "type": "stock"}
         """
         all_stocks = []
-        page_size = 200
-        max_pages = 30  # 200 * 30 = 6000, covers all ~5500 A-shares
+        page_size = 500  # Larger page → fewer HTTP requests
+        max_pages = 15   # 500 * 15 = 7500, covers all ~5500 A-shares
 
         for page in range(1, max_pages + 1):
             url = (
@@ -1140,11 +1403,12 @@ class DataEngine:
                 f"&fields=f12,f14"
             )
             try:
-                self._rate_limit()
+                # East Money bulk loading — use faster rate limit
+                self._rate_limit(min_interval=0.1)
                 resp = self.http.get(url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
                     "Referer": "http://quote.eastmoney.com/",
-                })
+                }, timeout=10)
                 data = resp.json()
                 items = data.get("data", {}).get("diff", [])
                 if not items:

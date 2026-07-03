@@ -1,6 +1,6 @@
 """Backtest schemas."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Any
 
 
@@ -11,9 +11,9 @@ class BacktestRequest(BaseModel):
     symbols: list = ["000001.SZ"]
     start_date: str = "2023-01-01"
     end_date: str = "2024-12-31"
-    initial_capital: float = 100000.0
-    commission_rate: float = 0.00025
-    slippage: float = 0.001
+    initial_capital: float = Field(100000.0, gt=0)
+    commission_rate: float = Field(0.00025, ge=0)
+    slippage: float = Field(0.001, ge=0)
     enable_env_filter: bool = True  # Layer 1: market environment filter
     enable_sector_filter: bool = True  # Layer 2: sector screening
     comparison_mode: bool = True  # Run with and without filters, compare
@@ -26,6 +26,6 @@ class BacktestOptimizeRequest(BaseModel):
     symbols: list = ["000001.SZ"]
     start_date: str = "2023-01-01"
     end_date: str = "2024-12-31"
-    initial_capital: float = 100000.0
+    initial_capital: float = Field(100000.0, gt=0)
     enable_env_filter: bool = True
     enable_sector_filter: bool = True

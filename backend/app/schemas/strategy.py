@@ -1,6 +1,6 @@
 """Strategy schemas."""
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Any
 
 
@@ -13,7 +13,7 @@ class StrategyCreate(BaseModel):
     parameters: dict = {}
     time_frame: str = "1d"
     mode: str = "paper"
-    initial_capital: float = 100000.0
+    initial_capital: float = Field(100000.0, gt=0)
 
 
 class StrategyUpdate(BaseModel):
@@ -22,5 +22,5 @@ class StrategyUpdate(BaseModel):
     parameters: Optional[dict] = None
     symbols: Optional[list] = None
     time_frame: Optional[str] = None
-    initial_capital: Optional[float] = None
+    initial_capital: Optional[float] = Field(None, gt=0)
     status: Optional[str] = None

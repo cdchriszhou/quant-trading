@@ -73,68 +73,65 @@ class MarketEnvEngine:
         return self.check_environment().get("env_state", "neutral")
 
     def get_avg_price_kline(self, count: int = 120) -> pd.DataFrame:
-        """Build a synthetic K-line DataFrame for the average stock price.
+        """Build a K-line DataFrame approximating the average stock price.
 
-        Uses the DataEngine to sample a representative basket of A-shares
-        and compute their average close / volume over `count` trading days.
+        Uses 上证指数 (000001.SH) K-line scaled to ~15 CNY (typical A-share price)
+        as a fast proxy. This avoids fetching history for 60+ individual stocks
+        which was the primary cause of homepage timeouts.
+
+        For the purpose of market environment analysis (MA alignment, trend direction,
+        volume health), the shape of the curve matters more than absolute price level.
         """
         from app.engine.data_engine import data_engine
 
-        # Use a representative symbol to get trading-date scaffolding,
-        # then rebuild the average price for each day.
-        df = data_engine.get_history_data(
-            "000001.SZ",
-            start_date=(datetime.datetime.now() - datetime.timedelta(days=count * 2)).strftime("%Y-%m-%d"),
-            end_date=datetime.datetime.now().strftime("%Y-%m-%d"),
-        )
-        if df is None or df.empty:
-            return self._generate_fallback_kline(count)
+        # Fast path: use 上证指数 K-line (1 HTTP request, cached)
+        try:
+            base_kline = data_engine.get_kline_data("000001.SH", "1d", count)
+            if base_kline and len(base_kline) >= 20:
+                # Scale from index level (~3000) to average stock price (~15)
+                first_close = base_kline[0]["close"]
+                scale = 15.0 / first_close if first_close > 100 else 1.0
 
-        # Build average price series from the sample basket
-        sample = data_engine._symbols[:100] if hasattr(data_engine, "_symbols") else []
-        if not sample:
-            return df  # fallback: return whatever we have
+                rows = []
+                for k in base_kline:
+                    rows.append({
+                        "date": k["date"],
+                        "open": round(k["open"] * scale, 2),
+                        "close": round(k["close"] * scale, 2),
+                        "high": round(k["high"] * scale, 2),
+                        "low": round(k["low"] * scale, 2),
+                        "volume": k.get("volume", 0),
+                    })
+                result = pd.DataFrame(rows)
+                if len(result) >= 20:
+                    return result
+        except Exception as e:
+            print(f"[MarketEnv] Fast kline failed: {e}")
 
-        avg_prices = []
-        avg_volumes = []
-        for _, row in df.iterrows():
-            # For each date we approximate the average price via the
-            # cached _calculate_avg_stock_price method (live snapshot),
-            # then scale historically using the index's daily return.
-            # Simpler approach: use the row's own values scaled.
-            avg_prices.append(row.get("close", 0))
-            avg_volumes.append(row.get("volume", 0))
-
-        result = pd.DataFrame({
-            "date": df["date"].values,
-            "open": df["open"].values,
-            "close": avg_prices,
-            "high": df["high"].values,
-            "low": df["low"].values,
-            "volume": avg_volumes,
-        })
-        return result
+        # Fallback: generate synthetic data
+        return self._generate_fallback_kline(count)
 
     @staticmethod
     def _generate_fallback_kline(count: int) -> pd.DataFrame:
         """Generate mock average-price K-line when APIs are unreachable."""
         import random
-        random.seed(42)
-        base_price = 15.0 + random.random() * 5
+        # Use a local Random instance to avoid corrupting the global random state
+        rng = random.Random(42)
+        base_price = 15.0 + rng.random() * 5
         drift = 0.0001
         volatility = 0.01
         prices = [base_price]
         for _ in range(count):
-            prices.append(prices[-1] * (1 + drift + volatility * (random.random() * 2 - 1)))
+            prices.append(prices[-1] * (1 + drift + volatility * (rng.random() * 2 - 1)))
 
         rows = []
         today = datetime.datetime.now()
         for i in range(count):
             close = round(prices[i + 1], 2)
-            open_p = round(close * (1 + (random.random() - 0.5) * 0.015), 2)
-            high = round(max(open_p, close) * (1 + random.random() * 0.01), 2)
-            low = round(min(open_p, close) * (1 - random.random() * 0.01), 2)
-            volume = int(30_000_000 + random.random() * 70_000_000)
+            open_p = round(close * (1 + (rng.random() - 0.5) * 0.015), 2)
+            high = round(max(open_p, close) * (1 + rng.random() * 0.01), 2)
+            low = round(min(open_p, close) * (1 - rng.random() * 0.01), 2)
+            volume = int(30_000_000 + rng.random() * 70_000_000)
             delta = datetime.timedelta(days=count - i)
             rows.append({
                 "date": (today - delta).strftime("%Y-%m-%d"),

@@ -34,6 +34,8 @@ def shell_scripts():
         # ============================================================
         "start.sh": """#!/bin/bash
 # Quant Trading System - Production Start
+# Usage: ./start.sh [--foreground]
+#   --foreground   Run in foreground (useful for local testing)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -42,6 +44,17 @@ cd "$SCRIPT_DIR"
 PID_FILE="$SCRIPT_DIR/backend/quant.pid"
 LOG_FILE="$SCRIPT_DIR/backend/quant.log"
 VENV_DIR="$SCRIPT_DIR/.venv"
+FOREGROUND=false
+
+if [ "$1" = "--foreground" ] || [ "$1" = "-f" ]; then
+    FOREGROUND=true
+fi
+
+# Colors
+GREEN='\\033[0;32m'
+YELLOW='\\033[1;33m'
+CYAN='\\033[0;36m'
+NC='\\033[0m'
 
 # Check if already running
 if [ -f "$PID_FILE" ]; then
@@ -65,21 +78,51 @@ if [ ! -f "$VENV_DIR/bin/python" ]; then
     python3 -m venv "$VENV_DIR"
 fi
 
-# Install dependencies
+# Install dependencies (bypass system proxy that may be down)
 echo "Installing Python dependencies..."
 cd "$SCRIPT_DIR/backend"
-"$VENV_DIR/bin/pip" install -r requirements.txt -q
+NO_PROXY="*" no_proxy="*" HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" \\
+    http_proxy="" https_proxy="" all_proxy="" \\
+    "$VENV_DIR/bin/pip" install -r requirements.txt -q
 
-# Start server in background
+# Start server
 echo "Starting Quant Trading System..."
 export STATIC_DIR="$SCRIPT_DIR/frontend"
-nohup "$VENV_DIR/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 >> "$LOG_FILE" 2>&1 &
-echo $! > "$PID_FILE"
 
-echo "Started (PID: $!)"
-echo "  API:      http://localhost:8000/api/docs"
-echo "  Frontend: http://localhost:8000"
-echo "  Logs:     $LOG_FILE"
+if $FOREGROUND; then
+    echo ""
+    echo -e "  ${GREEN}■${NC} Frontend:    http://localhost:8000"
+    echo -e "  ${GREEN}■${NC} API Docs:    http://localhost:8000/api/docs"
+    echo -e "  ${YELLOW}Press Ctrl+C to stop${NC}"
+    echo ""
+    exec "$VENV_DIR/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+else
+    nohup "$VENV_DIR/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 >> "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+
+    # Wait for health check
+    echo -n "  Waiting for server..."
+    for i in $(seq 1 30); do
+        if curl -s http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+            echo -e " ${GREEN}✓${NC}"
+            break
+        fi
+        if [ "$i" -eq 30 ]; then
+            echo -e " ${YELLOW}⚠${NC}"
+            echo "[WARN] Server may still be starting. Check logs: $LOG_FILE"
+        fi
+        echo -n "."
+        sleep 1
+    done
+
+    echo ""
+    echo -e "  ${GREEN}■${NC} Frontend:    http://localhost:8000"
+    echo -e "  ${GREEN}■${NC} API Docs:    http://localhost:8000/api/docs"
+    echo -e "  ${GREEN}■${NC} PID:         $(cat "$PID_FILE")"
+    echo -e "  ${GREEN}■${NC} Logs:        $LOG_FILE"
+    echo ""
+    echo "  Use ./stop.sh to stop the service."
+fi
 """,
         # ============================================================
         "stop.sh": """#!/bin/bash
@@ -295,7 +338,9 @@ VENV_DIR="$APP_DIR/.venv"
 if [ ! -f "$VENV_DIR/bin/python" ]; then
     python3 -m venv "$VENV_DIR"
 fi
-"$VENV_DIR/bin/pip" install -r requirements.txt -q
+NO_PROXY="*" no_proxy="*" HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" \\
+    http_proxy="" https_proxy="" all_proxy="" \\
+    "$VENV_DIR/bin/pip" install -r requirements.txt -q
 echo "  Done."
 
 echo
@@ -392,9 +437,15 @@ def main():
     print()
     print("[2/3] Building frontend...")
     frontend_dir = os.path.join(ROOT, "frontend")
+    # Build with proxy bypass (macOS system proxy may be set but app not running)
+    build_env = os.environ.copy()
+    for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]:
+        build_env.pop(k, None)
+    build_env["NO_PROXY"] = "*"
+    build_env["no_proxy"] = "*"
     if not os.path.isdir(os.path.join(frontend_dir, "node_modules")):
-        subprocess.run("npm install", cwd=frontend_dir, shell=True, check=True)
-    subprocess.run("npm run build", cwd=frontend_dir, shell=True, check=True)
+        subprocess.run("npm install", cwd=frontend_dir, shell=True, check=True, env=build_env)
+    subprocess.run("npm run build", cwd=frontend_dir, shell=True, check=True, env=build_env)
     print("  Frontend built.")
 
     # ---- Package into deploy/ -----------------------------------
