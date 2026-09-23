@@ -9,9 +9,16 @@
       </div>
       <div style="flex: 1; min-width: 0">
         <div style="font-weight: 700; font-size: 14px" :style="{ color: envTextColor }">{{ envStatusText }}</div>
-        <div style="font-size: 11px; color: #6b7280; margin-top: 2px">
-          平均股价: {{ envAvgPrice }} | MA20: {{ envMa20 }}
-          <span v-if="envSignals.length" style="margin-left: 8px">|</span>
+        <div style="font-size: 11px; color: #6b7280; margin-top: 2px; line-height: 1.45">
+          平均股价 {{ envAvgPrice }}
+          <span v-if="envMa20 !== '--'"> · MA20 {{ envMa20 }}（偏离 {{ envDistMa20 }}%）</span>
+          <span v-if="envBullScore != null"> · 多/空分 {{ envBullScore }}/{{ envBearScore }}</span>
+        </div>
+        <div v-if="envMarketLine" style="font-size: 11px; color: #6b7280; margin-top: 2px">
+          {{ envMarketLine }}
+        </div>
+        <div v-if="envSignalLine" style="font-size: 11px; color: #6b7280; margin-top: 2px">
+          {{ envSignalLine }}
         </div>
         <div v-if="envWarnings.length" style="font-size: 11px; color: #ef4444; margin-top: 2px">
           ⚠ {{ envWarnings[0] }}
@@ -52,7 +59,8 @@
               <span style="font-size: 10px; color: #9ca3af; letter-spacing: 1px">PORTFOLIO</span>
             </div>
           </template>
-          <div ref="equityChartRef" style="height: 300px"></div>
+          <div v-if="equityPoints.length" ref="equityChartRef" style="height: 300px"></div>
+          <el-empty v-else description="暂无成交记录，无法绘制权益曲线" :image-size="80" style="padding: 48px 0" />
         </el-card>
 
         <el-card shadow="never" style="border-radius: 10px">
@@ -67,8 +75,7 @@
             <el-table-column prop="trade_time" label="时间" width="160" />
             <el-table-column label="标的" width="140">
               <template #default="{ row }">
-                <div style="font-weight: 600; font-size: 12px">{{ row.symbol?.replace('.SZ','').replace('.SH','') }}</div>
-                <div style="color: #9ca3af; font-size: 11px">{{ getStockName(row.symbol) }}</div>
+                <StockTicker :symbol="row.symbol" :row="row" />
               </template>
             </el-table-column>
             <el-table-column prop="side" label="方向" width="70">
@@ -155,9 +162,10 @@
           </template>
           <div v-if="topGainers.length">
             <div v-for="(s, i) in topGainers" :key="s.code"
-                 style="display: flex; align-items: center; padding: 5px 0; border-bottom: 1px solid #f3f4f6; gap: 6px">
+                 class="mover-row"
+                 @click="openStock(s.code, s.name)">
               <span style="font-size: 11px; color: #9ca3af; width: 16px; text-align: center; flex-shrink: 0">{{ i + 1 }}</span>
-              <span style="flex: 1; min-width: 0; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ s.name }}</span>
+              <span style="flex: 1; min-width: 0; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #1a1a1a">{{ s.name }}</span>
               <span style="font-size: 10px; color: #9ca3af; flex-shrink: 0">{{ s.code.replace('.SZ','').replace('.SH','') }}</span>
               <span style="font-size: 11px; color: #6b7280; flex-shrink: 0; text-align: right; width: 48px">{{ s.price.toFixed(2) }}</span>
               <span style="font-size: 12px; font-weight: 700; flex-shrink: 0; text-align: right; width: 56px"
@@ -185,9 +193,10 @@
           </template>
           <div v-if="topLosers.length">
             <div v-for="(s, i) in topLosers" :key="s.code"
-                 style="display: flex; align-items: center; padding: 5px 0; border-bottom: 1px solid #f3f4f6; gap: 6px">
+                 class="mover-row"
+                 @click="openStock(s.code, s.name)">
               <span style="font-size: 11px; color: #9ca3af; width: 16px; text-align: center; flex-shrink: 0">{{ i + 1 }}</span>
-              <span style="flex: 1; min-width: 0; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{ s.name }}</span>
+              <span style="flex: 1; min-width: 0; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #1a1a1a">{{ s.name }}</span>
               <span style="font-size: 10px; color: #9ca3af; flex-shrink: 0">{{ s.code.replace('.SZ','').replace('.SH','') }}</span>
               <span style="font-size: 11px; color: #6b7280; flex-shrink: 0; text-align: right; width: 48px">{{ s.price.toFixed(2) }}</span>
               <span style="font-size: 12px; font-weight: 700; flex-shrink: 0; text-align: right; width: 56px"
@@ -208,8 +217,14 @@ import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { reportsApi } from '@/api/reports'
 import { marketApi } from '@/api/market'
 import { getEnvStatus } from '@/api/env'
-import { getStockName } from '@/utils/stockNames'
+import { displayStockName, ensureStockNames } from '@/utils/stockNames'
+import { useStockInsightStore } from '@/stores/stockInsight'
 import * as echarts from 'echarts'
+
+const stockInsight = useStockInsightStore()
+function openStock(code, name) {
+  stockInsight.open(code, name)
+}
 
 const cards = ref([
   { label: '总资产', value: '¥ --', icon: 'Money', color: '#00B4B4', pnlColor: undefined },
@@ -220,7 +235,7 @@ const cards = ref([
 
 const recentTrades = ref([])
 const marketIndices = ref([])
-const dataSource = ref('simulated')
+const dataSource = ref('realtime')
 const stats = ref({ total_strategies: 0, running_strategies: 0 })
 const moverTabs = [
   { key: 'all', label: '全部' },
@@ -233,6 +248,7 @@ const topGainers = ref([])
 const topLosers = ref([])
 const moverMarket = ref('all')
 const equityChartRef = ref(null)
+const equityPoints = ref([])
 let equityChart = null
 let intervalId = null
 let moversIntervalId = null
@@ -242,6 +258,10 @@ let lastDashboardData = null  // saved for chart rendering
 const envStatusText = ref('加载中...')
 const envAvgPrice = ref('--')
 const envMa20 = ref('--')
+const envDistMa20 = ref('--')
+const envBullScore = ref(null)
+const envBearScore = ref(null)
+const envMarketLine = ref('')
 const envCanTrade = ref(false)
 const envSignals = ref([])
 const envWarnings = ref([])
@@ -280,21 +300,50 @@ const envTagType = computed(() => {
   return 'warning'
 })
 
+/** Avoid repeating market_performance summaries already shown in envMarketLine. */
+const envSignalLine = computed(() => {
+  const market = (envMarketLine.value || '').trim()
+  const parts = (envSignals.value || [])
+    .map((s) => String(s || '').trim())
+    .filter(Boolean)
+    .filter((s) => {
+      if (!market) return true
+      if (s === market) return false
+      // drop if signal is just a subset already printed in market line
+      if (market.includes(s)) return false
+      if (s.includes('上证指数') && market.includes('上证指数')) return false
+      if (s.includes('涨板块') && market.includes('涨板块')) return false
+      return true
+    })
+  return parts.slice(0, 2).join(' · ')
+})
+
 async function loadEnvStatus() {
   try {
     const res = await getEnvStatus()
     const d = res.data
     envState.value = d.env_state || 'neutral'
-    envCanTrade.value = d.can_trade || false
+    envCanTrade.value = !!d.can_trade
+    const msg = d.message || ''
     if (envCanTrade.value) {
-      envStatusText.value = '🐂 多头市场'
+      envStatusText.value = '多头市场'
     } else if (d.env_state === 'bear') {
-      envStatusText.value = '🐻 空头市场'
+      envStatusText.value = '空头市场'
+    } else if (d.overheated || msg.includes('过热')) {
+      envStatusText.value = '多头过热'
     } else {
-      envStatusText.value = '⏸ 震荡市场'
+      envStatusText.value = '震荡观望'
     }
-    envAvgPrice.value = d.avg_price ? d.avg_price.toFixed(2) : '--'
-    envMa20.value = d.ma20 ? d.ma20.toFixed(2) : '--'
+    envAvgPrice.value = d.avg_price ? Number(d.avg_price).toFixed(2) : '--'
+    envMa20.value = d.ma20 ? Number(d.ma20).toFixed(2) : '--'
+    envDistMa20.value = d.dist_ma20_pct != null ? Number(d.dist_ma20_pct).toFixed(1) : '--'
+    envBullScore.value = d.bull_score != null ? d.bull_score : null
+    envBearScore.value = d.bear_score != null ? d.bear_score : null
+    const mp = d.market_performance || {}
+    const bits = []
+    if (mp.index_summary) bits.push(mp.index_summary)
+    if (mp.breadth_summary) bits.push(mp.breadth_summary)
+    envMarketLine.value = bits.join(' · ')
     envSignals.value = d.signals || []
     envWarnings.value = d.warnings || []
   } catch (e) {
@@ -336,14 +385,22 @@ async function loadDashboard() {
     ]
 
     recentTrades.value = data.recent_trades || []
+    await ensureStockNames(recentTrades.value.map((t) => t.symbol))
     marketIndices.value = data.market?.indices || []
-    dataSource.value = data.market?.data_source || 'simulated'
+    dataSource.value = data.market?.data_source || 'realtime'
     stats.value = { total_strategies: data.total_strategies || 0, running_strategies: data.running_strategies || 0 }
+<<<<<<< HEAD
     lastDashboardData = data  // save for chart renderer
+=======
+    equityPoints.value = Array.isArray(data.equity_curve) ? data.equity_curve : []
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
-    if (equityChartRef.value) {
+    if (equityPoints.value.length && equityChartRef.value) {
       await nextTick()
       renderChart()
+    } else if (equityChart) {
+      equityChart.dispose()
+      equityChart = null
     }
   } catch (err) {
     console.error('Dashboard error:', err)
@@ -351,10 +408,19 @@ async function loadDashboard() {
 }
 
 function renderChart() {
+<<<<<<< HEAD
   // Reuse chart instance: only create once, update data with setOption
   if (!equityChart) {
     equityChart = echarts.init(equityChartRef.value)
   }
+=======
+  if (!equityChartRef.value || !equityPoints.value.length) return
+  if (equityChart) equityChart.dispose()
+  equityChart = echarts.init(equityChartRef.value)
+
+  const dates = equityPoints.value.map((p) => p.date)
+  const values = equityPoints.value.map((p) => p.equity)
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
   // Build chart from account data: use current total equity as the latest point
   // and initial capital as the starting point for a realistic representation.
@@ -410,3 +476,17 @@ onUnmounted(() => {
   if (equityChart) equityChart.dispose()
 })
 </script>
+
+<style scoped>
+.mover-row {
+  display: flex;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px solid #f3f4f6;
+  gap: 6px;
+  cursor: pointer;
+}
+.mover-row:hover {
+  background: rgba(0, 180, 180, 0.04);
+}
+</style>

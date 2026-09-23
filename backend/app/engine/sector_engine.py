@@ -31,6 +31,9 @@ class SectorEngine:
         self._ranking_cache: list = []
         self._cache_ts: float = 0.0
         self._cache_ttl: float = float(settings.SECTOR_CACHE_TTL)  # seconds
+        # Serve stale cache up to this age while a refresh runs (production UX)
+        self._stale_ttl: float = float(getattr(settings, "SECTOR_STALE_TTL", 1800))
+        self._refreshing: bool = False
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -40,14 +43,54 @@ class SectorEngine:
         Returns a list of dicts sorted by strength_score descending:
           [{sector_code, sector_name, strength_score, rank,
             ma_alignment, change_20d, limit_up_count, leading_stock, is_blacklisted}, ...]
+
+        Production behavior: if cache expired but still within stale TTL, return
+        stale immediately and refresh in a background thread (unless force_refresh).
         """
         now = time.time()
-        if not force_refresh and self._ranking_cache and (now - self._cache_ts) < self._cache_ttl:
+        age = now - self._cache_ts if self._cache_ts else 1e9
+        if (
+            not force_refresh
+            and self._ranking_cache
+            and age < self._cache_ttl
+        ):
             return self._ranking_cache
 
+        if (
+            not force_refresh
+            and self._ranking_cache
+            and age < self._stale_ttl
+        ):
+            self._schedule_refresh()
+            return self._ranking_cache
+
+        return self._refresh_rankings()
+
+    def warm_cache(self) -> int:
+        """Blocking warm-up for startup; returns ranking size."""
+        ranking = self._refresh_rankings()
+        return len(ranking or [])
+
+    def _schedule_refresh(self) -> None:
+        if self._refreshing:
+            return
+        import threading
+
+        def _run():
+            try:
+                self._refresh_rankings()
+            except Exception as e:
+                print(f"[SectorEngine] background refresh failed: {e}")
+            finally:
+                self._refreshing = False
+
+        self._refreshing = True
+        threading.Thread(target=_run, name="sector-rank-refresh", daemon=True).start()
+
+    def _refresh_rankings(self) -> list:
         ranking = self._compute_all_rankings()
         self._ranking_cache = ranking
-        self._cache_ts = now
+        self._cache_ts = time.time()
         return ranking
 
     def get_top_sectors(self, top_n: int = None) -> list:
@@ -82,6 +125,7 @@ class SectorEngine:
         all_stocks = []
         seen = set()
 
+<<<<<<< HEAD
         # Build industry → stock mapping once
         industry_map = data_engine._build_industry_map() if hasattr(data_engine, "_build_industry_map") else {}
 
@@ -92,16 +136,17 @@ class SectorEngine:
         for sc in sector_codes:
             sector_name = sector_name_map.get(sc)
             if not sector_name:
+=======
+        for sc in sector_codes:
+            try:
+                rows = data_engine.get_sector_stocks(sc, count=limit_per_sector) or []
+            except Exception as e:
+                print(f"[SectorEngine] get_sector_stocks({sc}) failed: {e}")
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                 continue
-
-            # Match to East Money industry
-            matched = data_engine._match_industry(sector_name, list(industry_map.keys()))
-            if not matched:
-                continue
-
-            stocks = industry_map.get(matched, [])
-            for sym in stocks[:limit_per_sector]:
-                if sym not in seen:
+            for row in rows:
+                sym = row.get("code") if isinstance(row, dict) else row
+                if sym and sym not in seen:
                     all_stocks.append(sym)
                     seen.add(sym)
 
@@ -311,11 +356,16 @@ class SectorEngine:
     def _get_sector_kline(sector_code: str, count: int = 80) -> list | None:
         """Fetch K-line data for a sector/board index from Tencent.
 
+<<<<<<< HEAD
         Sector K-line uses the same Tencent K-line API with board-specific codes.
         Falls back to simulated data when API is unavailable.
 
         Uses a shorter timeout (5s) and faster rate limit (0.1s) since Tencent's
         board K-line API is more permissive than the quote API.
+=======
+        Tencent board codes look like ``pt01801081`` (NOT ``bkpt...``).
+        Falls back to None when API is unavailable (no simulated data).
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         """
         from app.engine.data_engine import data_engine
 
@@ -324,6 +374,7 @@ class SectorEngine:
         if cached:
             return cached
 
+<<<<<<< HEAD
         # Try fetching from Tencent using the board code
         tcode = f"bk{sector_code}" if not sector_code.startswith("bk") else sector_code
         url = (
@@ -350,15 +401,46 @@ class SectorEngine:
                                 "low": round(float(row[4]), 2),
                                 "volume": int(float(row[5])),
                             })
+=======
+        # Normalize: strip mistaken ``bk`` prefix before ``pt`` codes
+        code = (sector_code or "").strip()
+        if code.startswith("bkpt"):
+            code = code[2:]  # bkpt018... → pt018...
+        elif code.startswith("bk") and not code.startswith("bk0"):
+            # keep classic bk0475-style; only strip when it was wrongly prefixed
+            pass
+        if not code:
+            return None
+
+        stock = data_engine._fetch_tencent_kline_payload(code, "day", count, adjust="qfq")
+        if not stock:
+            stock = data_engine._fetch_tencent_kline_payload(code, "day", count, adjust="")
+        if stock:
+            klines_raw = (
+                stock.get("qfqday")
+                or stock.get("day")
+                or stock.get("qfqweek")
+                or []
+            )
+            if klines_raw:
+                result = []
+                for row in klines_raw:
+                    if len(row) >= 6:
+                        result.append({
+                            "date": str(row[0])[:10],
+                            "open": round(float(row[1]), 2),
+                            "close": round(float(row[2]), 2),
+                            "high": round(float(row[3]), 2),
+                            "low": round(float(row[4]), 2),
+                            "volume": int(float(row[5])),
+                        })
+                if result:
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                     data_engine._cache_set(cache_key, result)
                     return result
-        except Exception:
-            pass
 
-        # Fallback: generate mock K-line
-        mock = data_engine.generate_fallback_kline(f"{sector_code}.BK", "1d", count)
-        data_engine._cache_set(cache_key, mock)
-        return mock
+        print(f"[SectorEngine] Real sector kline unavailable for {sector_code}")
+        return None
 
 
 sector_engine = SectorEngine()

@@ -24,12 +24,14 @@ class Trade(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     def to_dict(self):
+        from app.models.naming import resolve_symbol_name
         return {
             "id": self.id,
             "user_id": self.user_id,
             "strategy_id": self.strategy_id,
             "order_id": self.order_id,
             "symbol": self.symbol,
+            "symbol_name": resolve_symbol_name(self.symbol),
             "side": self.side,
             "price": self.price,
             "quantity": self.quantity,

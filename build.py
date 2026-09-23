@@ -1,42 +1,52 @@
 """
 Quant Trading System - Build for Deployment
 
-Produces deploy.zip containing:
-  backend/app/     - Python application code
-  frontend/        - Compiled static files (vite build)
-  start.sh         - Production start (background, PID tracking)
-  stop.sh          - Production stop (graceful shutdown)
-  quant-update.sh  - Update from zip (backup -> unzip -> restore data)
-  rollback.sh      - Rollback to any previous backup
-  .env.example     - Configuration template
+Produces:
+  quant-trading-prod-<timestamp>.zip  - deploy package (quant-trading/ ...)
+  quant-update.sh                     - sibling updater (not inside the zip)
+
+Package layout:
+  quant-trading/
+    backend/app/           Python application
+    backend/requirements.txt
+    frontend/              Vite production build (static)
+    start.sh / stop.sh / rollback.sh
+    .env.example
 """
 
+from __future__ import annotations
+
 import os
-import sys
 import shutil
 import subprocess
+import sys
 import zipfile
 from datetime import datetime
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DEPLOY = os.path.join(ROOT, "deploy")
 
-# Zip filename with timestamp, e.g. quant-trading-prod-20260621-233457.zip
 TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 ZIP_NAME = f"quant-trading-prod-{TIMESTAMP}.zip"
 ZIP_FILE = os.path.join(ROOT, ZIP_NAME)
 
+IGNORE_PY = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".pytest_cache")
 
-def shell_scripts():
-    """Return dict of {filename: content} for Linux deployment scripts."""
+
+def shell_scripts() -> dict[str, str]:
+    """Return {filename: content} for Linux deployment scripts."""
 
     return {
-        # ============================================================
-        "start.sh": """#!/bin/bash
+        "start.sh": """\
+#!/bin/bash
 # Quant Trading System - Production Start
+<<<<<<< HEAD
 # Usage: ./start.sh [--foreground]
 #   --foreground   Run in foreground (useful for local testing)
 set -e
+=======
+set -euo pipefail
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -56,7 +66,6 @@ YELLOW='\\033[1;33m'
 CYAN='\\033[0;36m'
 NC='\\033[0m'
 
-# Check if already running
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")
     if kill -0 "$PID" 2>/dev/null; then
@@ -66,18 +75,23 @@ if [ -f "$PID_FILE" ]; then
     rm -f "$PID_FILE"
 fi
 
-# Ensure .env exists
 if [ ! -f "backend/.env" ]; then
-    cp -n .env.example backend/.env 2>/dev/null || true
-    echo "[WARN] No backend/.env found. Created from .env.example - please edit it."
+    if [ -f ".env.example" ]; then
+        cp .env.example backend/.env
+        echo "[WARN] Created backend/.env from .env.example"
+        echo "[WARN] Edit SECRET_KEY / CORS / trading flags before going live."
+    else
+        echo "[ERROR] Missing backend/.env and .env.example"
+        exit 1
+    fi
 fi
 
-# Setup virtual environment
-if [ ! -f "$VENV_DIR/bin/python" ]; then
+if [ ! -x "$VENV_DIR/bin/python" ]; then
     echo "Creating Python virtual environment..."
     python3 -m venv "$VENV_DIR"
 fi
 
+<<<<<<< HEAD
 # Install dependencies (bypass system proxy that may be down)
 echo "Installing Python dependencies..."
 cd "$SCRIPT_DIR/backend"
@@ -123,69 +137,93 @@ else
     echo ""
     echo "  Use ./stop.sh to stop the service."
 fi
+=======
+echo "Installing Python dependencies..."
+cd "$SCRIPT_DIR/backend"
+"$VENV_DIR/bin/pip" install --upgrade pip -q
+"$VENV_DIR/bin/pip" install -r requirements.txt -q
+
+echo "Starting Quant Trading System..."
+export STATIC_DIR="$SCRIPT_DIR/frontend"
+nohup "$VENV_DIR/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 >> "$LOG_FILE" 2>&1 &
+PID=$!
+echo "$PID" > "$PID_FILE"
+
+sleep 1
+if ! kill -0 "$PID" 2>/dev/null; then
+    echo "[ERROR] Process exited immediately. Check logs: $LOG_FILE"
+    rm -f "$PID_FILE"
+    exit 1
+fi
+
+echo "Started (PID: $PID)"
+echo "  App:  http://localhost:8000"
+echo "  Logs: $LOG_FILE"
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 """,
-        # ============================================================
-        "stop.sh": """#!/bin/bash
+        "stop.sh": """\
+#!/bin/bash
 # Quant Trading System - Production Stop
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PID_FILE="$SCRIPT_DIR/backend/quant.pid"
 
-if [ ! -f "$PID_FILE" ]; then
-    echo "No PID file found. Trying to find process by port..."
-    PID=$(lsof -ti :8000 2>/dev/null || true)
-    if [ -n "$PID" ]; then
-        kill "$PID" 2>/dev/null && echo "Stopped PID: $PID" || echo "Failed to stop PID: $PID"
+stop_pid() {
+    local PID="$1"
+    echo "Stopping Quant Trading System (PID: $PID)..."
+    if kill "$PID" 2>/dev/null; then
+        for _ in $(seq 1 10); do
+            if ! kill -0 "$PID" 2>/dev/null; then
+                echo "Stopped gracefully."
+                return 0
+            fi
+            sleep 1
+        done
+        echo "Force stopping..."
+        kill -9 "$PID" 2>/dev/null || true
     else
-        echo "No process found on port 8000."
+        echo "Process not running."
     fi
+}
+
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE")
+    stop_pid "$PID"
+    rm -f "$PID_FILE"
+    echo "Stopped."
     exit 0
 fi
 
-PID=$(cat "$PID_FILE")
-echo "Stopping Quant Trading System (PID: $PID)..."
-
-if kill "$PID" 2>/dev/null; then
-    for i in $(seq 1 10); do
-        if ! kill -0 "$PID" 2>/dev/null; then
-            echo "Stopped gracefully."
-            rm -f "$PID_FILE"
-            exit 0
-        fi
-        sleep 1
+echo "No PID file found. Trying port 8000..."
+PIDS=$(lsof -ti :8000 2>/dev/null || true)
+if [ -n "$PIDS" ]; then
+    for PID in $PIDS; do
+        stop_pid "$PID"
     done
-    echo "Force stopping..."
-    kill -9 "$PID" 2>/dev/null || true
 else
-    echo "Process not running."
+    echo "No process found on port 8000."
 fi
-
-rm -f "$PID_FILE"
-echo "Stopped."
 """,
-        # ============================================================
-        # quant-update.sh is NOT in the zip — it lives parallel to quant-trading/
-        # so it can stop the old app, unzip the new one, and restore data safely.
-        "quant-update.sh": """#!/bin/bash
+        # Lives next to the zip (not inside quant-trading/)
+        "quant-update.sh": """\
+#!/bin/bash
 # Quant Trading System - Update / First Deploy from zip
-# Place this script in the SAME directory as:
-#   - quant-trading-prod-*.zip   (the package)
-#   - quant-trading/             (will be created/updated)
+# Place beside:
+#   - quant-trading-prod-*.zip
+#   - quant-trading/   (created/updated)
 #
 # Usage:
-#   ./quant-update.sh                           # auto-find latest zip
-#   ./quant-update.sh quant-trading-prod-xxx.zip  # specify zip
-#
-# Flow: unzip -> stop old -> backup data -> deploy -> restore data -> start
-set -e
+#   ./quant-update.sh
+#   ./quant-update.sh quant-trading-prod-xxx.zip
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$SCRIPT_DIR/quant-trading"
 
-# Auto-detect zip if not specified
-ZIP_FILE="$1"
+ZIP_FILE="${1:-}"
 if [ -z "$ZIP_FILE" ]; then
-    ZIP_FILE=$(ls -1t "$SCRIPT_DIR"/quant-trading-prod-*.zip 2>/dev/null | head -1)
+    ZIP_FILE=$(ls -1t "$SCRIPT_DIR"/quant-trading-prod-*.zip 2>/dev/null | head -1 || true)
     if [ -z "$ZIP_FILE" ]; then
         echo "Usage: ./quant-update.sh [deploy.zip]"
         echo "  No zip specified and no quant-trading-prod-*.zip found in $SCRIPT_DIR"
@@ -218,21 +256,21 @@ fi
 echo "============================================"
 echo
 
-# 1. Stop old service (skip on first deploy)
+# 1. Stop
 if $IS_FIRST_DEPLOY; then
     echo "[1/6] First deploy, no old service to stop."
 else
     echo "[1/6] Stopping old service..."
     if [ -f "$APP_DIR/stop.sh" ]; then
-        bash "$APP_DIR/stop.sh"
+        bash "$APP_DIR/stop.sh" || true
     else
         PID=$(lsof -ti :8000 2>/dev/null || true)
-        [ -n "$PID" ] && kill "$PID" && sleep 2
+        [ -n "$PID" ] && kill $PID && sleep 2 || true
         echo "  Stopped."
     fi
 fi
 
-# 2. Backup old data (skip on first deploy)
+# 2. Backup
 if $IS_FIRST_DEPLOY; then
     echo
     echo "[2/6] First deploy, nothing to backup."
@@ -242,27 +280,29 @@ else
     mkdir -p "$BACKUP_DIR"
     tar -czf "$BACKUP_FILE" \
         -C "$APP_DIR" \
+        --ignore-failed-read \
         backend/.env \
         backend/*.db \
         backend/*.db-shm \
         backend/*.db-wal \
         backend/app \
+        backend/requirements.txt \
         2>/dev/null || true
 
     if [ -s "$BACKUP_FILE" ]; then
         echo "  Backup: $BACKUP_FILE"
-        COUNT=$(tar -tzf "$BACKUP_FILE" 2>/dev/null | wc -l)
+        COUNT=$(tar -tzf "$BACKUP_FILE" 2>/dev/null | wc -l | tr -d ' ')
         echo "  $COUNT files archived"
     else
         rm -f "$BACKUP_FILE"
         echo "  (no old data to backup)"
+        BACKUP_FILE=""
     fi
 
-    # Keep last 30 backups
     ls -t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null | tail -n +31 | xargs rm -f 2>/dev/null || true
 fi
 
-# 3. Unzip new package
+# 3. Unzip
 echo
 echo "[3/6] Extracting new package..."
 rm -rf "$TMP_DIR"
@@ -277,10 +317,9 @@ fi
 echo "  Contents:"
 ls -la "$SRC" | sed 's/^/    /'
 
-# 4. Deploy new code
+# 4. Deploy
 echo
 echo "[4/6] Deploying new code..."
-# If first deploy, just move the whole directory
 if $IS_FIRST_DEPLOY; then
     mv "$SRC" "$APP_DIR"
     echo "  quant-trading/ created from zip"
@@ -290,6 +329,11 @@ else
         cp -r "$SRC/backend/app" "$APP_DIR/backend/app"
         echo "  backend/app/ updated"
     fi
+    if [ -f "$SRC/backend/requirements.txt" ]; then
+        mkdir -p "$APP_DIR/backend"
+        cp "$SRC/backend/requirements.txt" "$APP_DIR/backend/requirements.txt"
+        echo "  backend/requirements.txt updated"
+    fi
     if [ -d "$SRC/frontend" ]; then
         rm -rf "$APP_DIR/frontend"
         cp -r "$SRC/frontend" "$APP_DIR/frontend"
@@ -297,7 +341,7 @@ else
     fi
     if [ -f "$SRC/.env.example" ]; then
         cp "$SRC/.env.example" "$APP_DIR/.env.example"
-        echo "  .env.example updated"
+        echo "  .env.example updated (existing backend/.env kept)"
     fi
     for script in start.sh stop.sh rollback.sh; do
         if [ -f "$SRC/$script" ]; then
@@ -308,31 +352,35 @@ else
     done
 fi
 
-# 5. Restore data from backup (skip on first deploy)
+# 5. Config / restore
 if $IS_FIRST_DEPLOY; then
     echo
     echo "[5/6] First deploy, creating default config..."
     if [ ! -f "$APP_DIR/backend/.env" ] && [ -f "$APP_DIR/.env.example" ]; then
         cp "$APP_DIR/.env.example" "$APP_DIR/backend/.env"
         echo "  Created backend/.env from .env.example"
+        echo "  >>> Edit SECRET_KEY and production flags before start.sh <<<"
     fi
 else
     echo
     echo "[5/6] Restoring data..."
-    if [ -f "$BACKUP_FILE" ]; then
+    if [ -n "${BACKUP_FILE:-}" ] && [ -f "$BACKUP_FILE" ]; then
         tar -xzf "$BACKUP_FILE" -C "$APP_DIR" backend/.env 2>/dev/null && \
             echo "  .env restored" || echo "  No .env in backup"
-        tar -xzf "$BACKUP_FILE" -C "$APP_DIR" --wildcards 'backend/*.db' --wildcards 'backend/*.db-shm' --wildcards 'backend/*.db-wal' 2>/dev/null && \
-            echo "  Database restored" || echo "  No database in backup"
+        tar -xzf "$BACKUP_FILE" -C "$APP_DIR" \
+            --wildcards 'backend/*.db' \
+            --wildcards 'backend/*.db-shm' \
+            --wildcards 'backend/*.db-wal' \
+            2>/dev/null && echo "  Database restored" || echo "  No database in backup"
     fi
 fi
 
-# Cleanup temp
 rm -rf "$TMP_DIR"
 
-# 6. Install dependencies and start
+# 6. Deps + start
 echo
 echo "[6/6] Installing dependencies and starting..."
+<<<<<<< HEAD
 cd "$APP_DIR/backend"
 VENV_DIR="$APP_DIR/.venv"
 if [ ! -f "$VENV_DIR/bin/python" ]; then
@@ -345,30 +393,34 @@ echo "  Done."
 
 echo
 echo "Starting service..."
+=======
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 cd "$APP_DIR"
+chmod +x start.sh stop.sh rollback.sh 2>/dev/null || true
 bash start.sh
 
 echo
 echo "============================================"
 echo "  Update complete!"
-if [ -f "$BACKUP_FILE" ]; then
+if [ -n "${BACKUP_FILE:-}" ] && [ -f "$BACKUP_FILE" ]; then
     echo "  Backup: $BACKUP_FILE"
 fi
 echo "============================================"
 """,
-        # ============================================================
-        "rollback.sh": """#!/bin/bash
+        "rollback.sh": """\
+#!/bin/bash
 # Quant Trading System - Rollback to a previous backup
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 BACKUP_DIR="$SCRIPT_DIR/backups"
 
-if [ -z "$1" ]; then
+if [ -z "${1:-}" ]; then
     echo "Usage: ./rollback.sh <backup-file>"
     echo "Available backups:"
     if [ -d "$BACKUP_DIR" ]; then
-        ls -1t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null | head -20 | while read f; do
+        ls -1t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null | head -20 | while read -r f; do
             SIZE=$(du -h "$f" 2>/dev/null | cut -f1)
             echo "  $(basename "$f")  ($SIZE)"
         done
@@ -394,7 +446,7 @@ echo
 
 echo "[1/3] Stopping service..."
 if [ -f "$SCRIPT_DIR/stop.sh" ]; then
-    bash "$SCRIPT_DIR/stop.sh"
+    bash "$SCRIPT_DIR/stop.sh" || true
 fi
 
 echo
@@ -415,18 +467,28 @@ echo "============================================"
     }
 
 
-def main():
+def _require_tools() -> None:
+    for cmd, hint in (
+        ("npm", "Install Node.js 18+"),
+        ("node", "Install Node.js 18+"),
+    ):
+        if shutil.which(cmd) is None:
+            raise SystemExit(f"[ERROR] `{cmd}` not found. {hint}")
+
+
+def main() -> None:
     print("=" * 44)
     print("  Quant Trading System - Build for Deploy")
     print("=" * 44)
     print()
 
+    _require_tools()
+
     # ---- Clean --------------------------------------------------
-    print("[1/3] Cleaning previous build...")
+    print("[1/4] Cleaning previous build...")
     if os.path.exists(DEPLOY):
         shutil.rmtree(DEPLOY)
     os.makedirs(DEPLOY)
-    # Clean old zip files
     for old_zip in os.listdir(ROOT):
         if old_zip.startswith("quant-trading-prod-") and old_zip.endswith(".zip"):
             os.remove(os.path.join(ROOT, old_zip))
@@ -435,8 +497,9 @@ def main():
 
     # ---- Build frontend -----------------------------------------
     print()
-    print("[2/3] Building frontend...")
+    print("[2/4] Building frontend...")
     frontend_dir = os.path.join(ROOT, "frontend")
+<<<<<<< HEAD
     # Build with proxy bypass (macOS system proxy may be set but app not running)
     build_env = os.environ.copy()
     for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]:
@@ -446,127 +509,124 @@ def main():
     if not os.path.isdir(os.path.join(frontend_dir, "node_modules")):
         subprocess.run("npm install", cwd=frontend_dir, shell=True, check=True, env=build_env)
     subprocess.run("npm run build", cwd=frontend_dir, shell=True, check=True, env=build_env)
+=======
+    node_modules = os.path.join(frontend_dir, "node_modules")
+    if not os.path.isdir(node_modules):
+        print("  npm install...")
+        subprocess.run("npm install", cwd=frontend_dir, shell=True, check=True)
+    subprocess.run("npm run build", cwd=frontend_dir, shell=True, check=True)
+    frontend_dist = os.path.join(frontend_dir, "dist")
+    if not os.path.isdir(frontend_dist) or not os.path.isfile(
+        os.path.join(frontend_dist, "index.html")
+    ):
+        raise SystemExit("[ERROR] frontend/dist/index.html missing after build")
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     print("  Frontend built.")
 
-    # ---- Package into deploy/ -----------------------------------
+    # ---- Package ------------------------------------------------
     print()
-    print("[3/3] Packaging deploy.zip...")
+    print("[3/4] Packaging...")
 
-    APP_DIR = os.path.join(DEPLOY, "quant-trading")
+    app_dir = os.path.join(DEPLOY, "quant-trading")
+    backend_src = os.path.join(ROOT, "backend")
+    req_src = os.path.join(backend_src, "requirements.txt")
+    env_src = os.path.join(backend_src, ".env.example")
 
-    # Backend code -> deploy/quant-trading/backend/app/
+    if not os.path.isfile(req_src):
+        raise SystemExit("[ERROR] backend/requirements.txt missing")
+    if not os.path.isfile(env_src):
+        raise SystemExit("[ERROR] backend/.env.example missing")
+
     shutil.copytree(
-        os.path.join(ROOT, "backend", "app"),
-        os.path.join(APP_DIR, "backend", "app"),
+        os.path.join(backend_src, "app"),
+        os.path.join(app_dir, "backend", "app"),
+        ignore=IGNORE_PY,
     )
-    shutil.copy2(
-        os.path.join(ROOT, "backend", "requirements.txt"),
-        os.path.join(APP_DIR, "backend", "requirements.txt"),
-    )
+    shutil.copy2(req_src, os.path.join(app_dir, "backend", "requirements.txt"))
+    shutil.copytree(frontend_dist, os.path.join(app_dir, "frontend"))
+    shutil.copy2(env_src, os.path.join(app_dir, ".env.example"))
 
-    # Frontend static -> deploy/quant-trading/frontend/
-    frontend_dist = os.path.join(ROOT, "frontend", "dist")
-    if os.path.isdir(frontend_dist):
-        shutil.copytree(frontend_dist, os.path.join(APP_DIR, "frontend"))
-
-    # Shell scripts inside quant-trading/
     for name, content in shell_scripts().items():
         if name == "quant-update.sh":
-            # Write OUTSIDE quant-trading/, parallel to it
             path = os.path.join(DEPLOY, name)
         else:
-            # Write INSIDE quant-trading/
-            path = os.path.join(APP_DIR, name)
+            path = os.path.join(app_dir, name)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(content.lstrip("\n"))
+            f.write(content)
+        # Mark executable bit in zip via external attr on Unix; on Windows
+        # chmod is applied by quant-update.sh / first deploy instructions.
 
-    # .env.example -> deploy/quant-trading/.env.example
-    env_example = """\
-# Quant Trading System - Production Configuration
-# Copy to backend/.env and edit before starting.
-
-APP_NAME="Quant Trading System"
-DEBUG=false
-
-# Database: sqlite (default) or mysql
-DB_DRIVER=sqlite
-# DB_HOST=127.0.0.1
-# DB_PORT=3306
-# DB_USER=root
-# DB_PASSWORD=quant123
-# DB_NAME=quant_trading
-
-# Security - CHANGE this to a random string!
-SECRET_KEY=change-this-to-a-random-secret
-
-CORS_ORIGINS=["*"]
-
-MARKET_DATA_SOURCE=realtime
-
-TRADING_MODE=paper
-DEFAULT_CASH=1000000.0
-COMMISSION_RATE=0.00025
-MIN_COMMISSION=5.0
-"""
-    with open(os.path.join(APP_DIR, ".env.example"), "w", encoding="utf-8", newline="\n") as f:
-        f.write(env_example)
-
-    # ---- Zip: zip the quant-trading/ directory as-is ------------
+    # ---- Zip ----------------------------------------------------
+    print()
+    print("[4/4] Creating zip...")
     with zipfile.ZipFile(ZIP_FILE, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(APP_DIR):
+        for root, _dirs, files in os.walk(app_dir):
             for fname in files:
                 full = os.path.join(root, fname)
-                arcname = os.path.relpath(full, DEPLOY)  # quant-trading/backend/...
-                zf.write(full, arcname)
+                arcname = os.path.relpath(full, DEPLOY)  # quant-trading/...
+                # Ensure shell scripts are executable when unzipped on Unix
+                if fname.endswith(".sh"):
+                    info = zipfile.ZipInfo(arcname.replace("\\", "/"))
+                    info.date_time = datetime.now().timetuple()[:6]
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.external_attr = 0o755 << 16
+                    with open(full, "rb") as sf:
+                        zf.writestr(info, sf.read())
+                else:
+                    zf.write(full, arcname.replace("\\", "/"))
 
     zip_size = os.path.getsize(ZIP_FILE)
-    print(f"  {ZIP_NAME} created ({zip_size / 1024:.0f} KB)")
-    up_size = os.path.getsize(os.path.join(DEPLOY, "quant-update.sh"))
-    print(f"  quant-update.sh created ({up_size} B)")
+    print(f"  {ZIP_NAME} ({zip_size / 1024:.0f} KB)")
 
-    # Copy quant-update.sh to project root, then clean up deploy/
     shutil.copy2(
         os.path.join(DEPLOY, "quant-update.sh"),
         os.path.join(ROOT, "quant-update.sh"),
     )
+    # Preserve executable bit for local WSL/Git Bash users
+    try:
+        os.chmod(os.path.join(ROOT, "quant-update.sh"), 0o755)
+    except OSError:
+        pass
+
     shutil.rmtree(DEPLOY)
 
-    # ---- Done ---------------------------------------------------
     print()
     print("=" * 44)
-    print(f"  Build complete!")
+    print("  Build complete!")
     print(f"    {ZIP_NAME}")
-    print(f"    quant-update.sh")
+    print("    quant-update.sh")
     print("=" * 44)
     print()
-    print("  --- First deploy to Linux ---")
+    print("  --- First deploy ---")
     print()
     print(f"    scp {ZIP_NAME} quant-update.sh user@host:/opt/")
-    print()
     print("    ssh user@host")
-    print("    cd /opt")
-    print(f"    unzip {ZIP_NAME}            # creates quant-trading/")
-    print("    cd quant-trading")
-    print("    cp .env.example backend/.env")
-    print("    vim backend/.env            # change SECRET_KEY")
-    print("    chmod +x *.sh && ./start.sh")
+    print("    cd /opt && chmod +x quant-update.sh")
+    print("    ./quant-update.sh")
+    print("    vim quant-trading/backend/.env   # SECRET_KEY / flags")
+    print("    cd quant-trading && ./stop.sh && ./start.sh")
     print()
-    print("  --- Update (preserves DB and config) ---")
+    print("  --- Update (keeps DB + .env) ---")
     print()
-    print("    python build.py")
     print(f"    scp {ZIP_NAME} quant-update.sh user@host:/opt/")
-    print("    ssh user@host")
-    print("    cd /opt")
-    print(f"    ./quant-update.sh              # auto-detects {ZIP_NAME}")
+    print("    ssh user@host 'cd /opt && ./quant-update.sh'")
     print()
     print("  --- Rollback ---")
     print()
-    print("    ssh user@host")
     print("    cd /opt/quant-trading")
-    print("    ./rollback.sh               # list backups")
-    print("    ./rollback.sh backups/backup_20220622_140000.tar.gz")
+    print("    ./rollback.sh                   # list")
+    print("    ./rollback.sh backups/backup_xxx.tar.gz")
     print("=" * 44)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except subprocess.CalledProcessError as e:
+        print(f"\n[ERROR] Command failed with exit code {e.returncode}", file=sys.stderr)
+        sys.exit(e.returncode or 1)
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"\n[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)

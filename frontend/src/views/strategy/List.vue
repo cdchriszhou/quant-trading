@@ -9,24 +9,29 @@
       <div v-if="strategies.length" style="overflow-x: auto; -webkit-overflow-scrolling: touch">
         <el-table :data="strategies" stripe size="small">
         <el-table-column prop="name" label="策略名称" min-width="140" />
-        <el-table-column prop="strategy_type" label="策略类型" width="100">
+        <el-table-column prop="strategy_type" label="策略类型" width="130">
           <template #default="{ row }">
-            <el-tag>{{ typeLabel(row.strategy_type) }}</el-tag>
+            <el-tag size="small">{{ strategyTypeLabel(row.strategy_type) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="交易标的" width="160">
           <template #default="{ row }">
-            <div v-for="sn in (row.symbol_names || parseToNames(row.symbols))" :key="sn.code" style="font-size: 12px; margin-bottom: 1px">
-              {{ sn.code.replace('.SZ','').replace('.SH','') }}
-              <span style="color: #9ca3af; font-size: 10px">{{ sn.name }}</span>
+            <div v-for="sn in (row.symbol_names || parseToNames(row.symbols))" :key="sn.code" style="margin-bottom: 2px">
+              <StockTicker :symbol="sn.code" :name="sn.name" />
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="mode" label="模式" width="70" />
+        <el-table-column label="模式" width="80">
+          <template #default="{ row }">
+            <el-tag :type="row.mode === 'live' ? 'danger' : 'info'" size="small" effect="plain">
+              {{ tradeModeLabel(row.mode) }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column prop="status" label="状态" width="80">
           <template #default="{ row }">
             <el-tag :type="row.status === 'running' ? 'success' : 'info'" size="small">
-              {{ row.status === 'running' ? '运行中' : '已停止' }}
+              {{ strategyStatusLabel(row.status) }}
             </el-tag>
           </template>
         </el-table-column>
@@ -64,13 +69,11 @@ import { ref, onMounted } from 'vue'
 import { strategyApi } from '@/api/strategy'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getStockName } from '@/utils/stockNames'
+import { strategyTypeLabel, tradeModeLabel, strategyStatusLabel } from '@/utils/labels'
 
 const strategies = ref([])
 
-const typeMap = { ma: '均线', macd: 'MACD', bollinger: '布林带', grid: '网格', dca: '定投', dragon_pullback: '龙回头', trend_following: '趋势跟踪' }
-function typeLabel(t) { return typeMap[t] || t }
 function parseToNames(symbols) {
-  // Fallback: convert raw symbols list to [{code, name}] format
   const list = Array.isArray(symbols) ? symbols : []
   return list.map(s => ({ code: s, name: getStockName(s) }))
 }

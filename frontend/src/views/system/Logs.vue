@@ -10,7 +10,9 @@
       <el-table-column prop="detail" label="详情" min-width="200" show-overflow-tooltip />
       <el-table-column prop="status" label="状态" width="70">
         <template #default="{ row }">
-          <el-tag :type="row.status === 'success' ? 'success' : 'danger'" size="small">{{ row.status }}</el-tag>
+          <el-tag :type="row.status === 'success' ? 'success' : 'danger'" size="small">
+            {{ row.status === 'success' ? '成功' : '失败' }}
+          </el-tag>
         </template>
       </el-table-column>
     </el-table>

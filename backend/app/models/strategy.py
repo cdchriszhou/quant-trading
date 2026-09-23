@@ -19,8 +19,8 @@ class Strategy(Base):
     time_frame = Column(String(16), default="1d")  # 1m, 5m, 15m, 30m, 1h, 4h, 1d, 1w
     status = Column(String(16), default="stopped")  # stopped, running, paused
     mode = Column(String(16), default="paper")  # paper, live
-    initial_capital = Column(Float, default=100000.0)
-    current_capital = Column(Float, default=100000.0)
+    initial_capital = Column(Float, default=1000000.0)
+    current_capital = Column(Float, default=1000000.0)
     total_return = Column(Float, default=0.0)
     total_trades = Column(Integer, default=0)
     win_rate = Column(Float, default=0.0)

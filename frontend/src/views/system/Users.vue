@@ -51,11 +51,14 @@
         </template>
       </el-table-column>
       <el-table-column prop="created_at" label="注册时间" width="160" />
-      <el-table-column label="操作" width="180" fixed="right">
+      <el-table-column label="操作" width="260" fixed="right">
         <template #default="{ row }">
           <el-button text size="small" @click="openEdit(row)">编辑</el-button>
           <el-button text size="small" :type="row.role === 'admin' ? '' : 'warning'" @click="toggleRole(row)">
             设为{{ row.role === 'admin' ? '用户' : '管理员' }}
+          </el-button>
+          <el-button text size="small" type="danger" :loading="resettingId === row.id" @click="resetTrading(row)">
+            初始化
           </el-button>
         </template>
       </el-table-column>
@@ -99,12 +102,19 @@
 import { ref, reactive, onMounted } from 'vue'
 import { adminApi } from '@/api/admin'
 import { ElMessage, ElMessageBox } from 'element-plus'
+<<<<<<< HEAD
 import { WarningFilled } from '@element-plus/icons-vue'
+=======
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
 const users = ref([])
 const dialogVisible = ref(false)
 const saving = ref(false)
+<<<<<<< HEAD
 const resetting = ref(false)
+=======
+const resettingId = ref(null)
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 const formRef = ref(null)
 const editingId = ref(null)
 const cashInputs = ref({})
@@ -194,6 +204,37 @@ async function toggleRole(user) {
     await load()
   } catch (e) {
     ElMessage.error('更新失败')
+  }
+}
+
+async function resetTrading(user) {
+  try {
+    await ElMessageBox.confirm(
+      `确定初始化账户「${user.username}」？\n将清空该账号的策略、订单、持仓、成交、回测与通知，资金恢复为初始资金 ¥${(user.initial_cash || 0).toLocaleString()}。此操作不可撤销。`,
+      '初始化账户',
+      {
+        type: 'warning',
+        confirmButtonText: '确认清空',
+        cancelButtonText: '取消',
+        confirmButtonClass: 'el-button--danger',
+      },
+    )
+  } catch {
+    return
+  }
+
+  resettingId.value = user.id
+  try {
+    const res = await adminApi.resetUserTrading(user.id)
+    const cleared = res?.data?.cleared || {}
+    const parts = Object.entries(cleared)
+      .filter(([, n]) => n > 0)
+      .map(([k, n]) => `${k}:${n}`)
+    ElMessage.success(parts.length ? `已初始化（${parts.join('，')}）` : (res?.message || '已初始化'))
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '初始化失败')
+  } finally {
+    resettingId.value = null
   }
 }
 

@@ -7,6 +7,7 @@ from datetime import datetime
 from app.core.database import get_db
 from app.core.security import get_password_hash, verify_password, create_access_token
 from app.core.deps import get_current_user
+from app.core.config import settings
 from app.models.user import User
 from app.models.operation_log import OperationLog
 from app.schemas.auth import LoginRequest, RegisterRequest, UserUpdate
@@ -47,6 +48,9 @@ def login(request: LoginRequest, db: Session = Depends(get_db)):
 
 @router.post("/register")
 def register(request: RegisterRequest, db: Session = Depends(get_db)):
+    if not settings.ALLOW_REGISTER:
+        raise HTTPException(status_code=403, detail="系统已关闭自助注册，请联系管理员")
+
     existing = db.query(User).filter(User.username == request.username).first()
     if existing:
         raise HTTPException(status_code=400, detail="用户名已存在")

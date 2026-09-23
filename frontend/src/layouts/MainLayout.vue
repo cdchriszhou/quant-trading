@@ -4,7 +4,7 @@
     <el-aside
       v-if="!isMobile"
       :width="isCollapse ? '64px' : '220px'"
-      style="background: #fff; border-right: 1px solid #e5e7eb; transition: width 0.3s; flex-shrink: 0"
+      style="background: #fff; border-right: 1px solid #e5e7eb; transition: width 0.3s; flex-shrink: 0; overflow-x: hidden; overflow-y: auto"
     >
       <SidebarMenu :is-collapse="isCollapse" />
     </el-aside>
@@ -40,12 +40,19 @@
             <Fold v-if="!isCollapse" /><Expand v-else />
           </el-icon>
           <el-breadcrumb separator="/" style="font-size: 13px">
-            <el-breadcrumb-item :to="{ path: '/dashboard' }">首页</el-breadcrumb-item>
-            <el-breadcrumb-item v-if="route.name && route.path !== '/dashboard'">
-              <span style="max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle">
-                {{ route.meta?.title || route.name }}
-              </span>
-            </el-breadcrumb-item>
+            <template v-if="route.path === '/dashboard'">
+              <el-breadcrumb-item>仪表盘</el-breadcrumb-item>
+            </template>
+            <template v-else>
+              <el-breadcrumb-item v-if="route.meta?.parent">
+                {{ route.meta.parent }}
+              </el-breadcrumb-item>
+              <el-breadcrumb-item>
+                <span style="max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle">
+                  {{ route.meta?.title || '' }}
+                </span>
+              </el-breadcrumb-item>
+            </template>
           </el-breadcrumb>
         </div>
         <div style="display: flex; align-items: center; gap: 10px">
@@ -101,6 +108,18 @@
             </div>
           </el-popover>
 
+          <!-- Account mode switch -->
+          <el-select
+            :model-value="accountStore.mode"
+            size="small"
+            style="width: 118px"
+            :loading="accountStore.loading"
+            @change="onAccountModeChange"
+          >
+            <el-option label="模拟资金" value="paper" />
+            <el-option label="真实账户" value="live" :disabled="!accountStore.allowLive" />
+          </el-select>
+
           <!-- Live clock -->
           <span style="font-size: 12px; font-weight: 600; color: #374151; white-space: nowrap; font-variant-numeric: tabular-nums; user-select: none">
             {{ nowStr }}
@@ -108,7 +127,7 @@
 
           <span style="font-size: 10px; font-weight: 600; letter-spacing: 1px; padding: 2px 6px; border-radius: 3px; white-space: nowrap"
                 :style="wsConnected ? 'color:#00B4B4;background:rgba(0,180,180,0.1)' : 'color:#ef4444;background:rgba(239,68,68,0.08)'">
-            {{ wsConnected ? 'LIVE' : 'OFFLINE' }}
+            {{ wsConnected ? 'LIVE行情' : 'OFFLINE' }}
           </span>
           <el-dropdown @command="handleCommand">
             <span style="cursor: pointer; display: flex; align-items: center; gap: 4px; font-size: 13px; color: #374151; white-space: nowrap">
@@ -125,23 +144,47 @@
         </div>
       </el-header>
       <el-main style="background: #f5f6f8; padding: 12px; overflow-y: auto; overflow-x: hidden">
-        <router-view />
+        <router-view v-slot="{ Component, route: r }">
+          <keep-alive :include="['Recommend']">
+            <component :is="Component" :key="r.name" />
+          </keep-alive>
+        </router-view>
       </el-main>
     </el-container>
   </el-container>
+
+  <StockInsightDialog />
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import { useAccountStore } from '@/stores/account'
 import { notificationsApi } from '@/api/notifications'
+import { ElMessageBox } from 'element-plus'
 import SidebarMenu from './SidebarMenu.vue'
+import StockInsightDialog from '@/components/StockInsightDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const accountStore = useAccountStore()
 
+async function onAccountModeChange(next) {
+  try {
+    if (next === 'live') {
+      await ElMessageBox.confirm(
+        '将切换到真实券商账户（MiniQMT）。下单会进入真实交易通道，请确认已在「系统管理 → 实盘接入」完成配置。',
+        '切换真实账户',
+        { type: 'warning', confirmButtonText: '确认切换', cancelButtonText: '取消' }
+      )
+    }
+    await accountStore.switchMode(next)
+  } catch {
+    // cancelled or failed — keep current
+  }
+}
 const isCollapse = ref(false)
 const drawerOpen = ref(false)
 const isMobile = ref(false)
@@ -233,7 +276,7 @@ function connectNotifWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
   try {
-    notifWs = new WebSocket(`${protocol}//${host}/ws/notifications?token=${token}`)
+    notifWs = new WebSocket(`${protocol}//${host}/ws/notifications?token=${encodeURIComponent(token)}`)
     notifWs.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data)
@@ -279,7 +322,9 @@ function handleCommand(command) {
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
-  ws = new WebSocket(`${protocol}//${host}/ws/market`)
+  const token = localStorage.getItem('token') || ''
+  const q = token ? `?token=${encodeURIComponent(token)}` : ''
+  ws = new WebSocket(`${protocol}//${host}/ws/market${q}`)
   ws.onopen = () => { wsConnected.value = true }
   ws.onclose = () => { wsConnected.value = false }
   ws.onerror = () => { wsConnected.value = false }
@@ -293,6 +338,7 @@ onMounted(() => {
   fetchUnreadCount()
   updateClock()
   clockTimer = setInterval(updateClock, 1000)
+  accountStore.refresh()
 })
 
 onUnmounted(() => {

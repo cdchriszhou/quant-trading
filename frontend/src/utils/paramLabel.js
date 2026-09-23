@@ -36,7 +36,11 @@ const PARAM_LABELS = {
   stop_loss_ma_break_pct: '均线止损破位幅度(%)',
   hard_stop_pct: '硬止损(%)',
   ma_slope_flat_threshold: '均线斜率平坦阈值',
-  min_daily_amount: '最小日均成交额',
+  min_daily_amount: '最小日均成交额(元)',
+  // 仓位（波动率目标）
+  target_volatility: '目标年化波动率',
+  max_position_pct: '单笔最大仓位比例',
+  vol_lookback: '波动率回看天数',
 }
 
 export function paramLabel(key) {

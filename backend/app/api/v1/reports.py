@@ -1,5 +1,7 @@
 """Reports and statistics API routes."""
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -19,7 +21,7 @@ router = APIRouter(prefix="/reports", tags=["Reports"])
 
 
 @router.get("/dashboard")
-def get_dashboard(
+async def get_dashboard(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -42,7 +44,7 @@ def get_dashboard(
     ).order_by(Trade.created_at.desc()).limit(10).all()
 
     try:
-        overview = data_engine.get_market_overview()
+        overview = await asyncio.to_thread(data_engine.get_market_overview)
     except RuntimeError as e:
         overview = {
             "indices": [],
@@ -58,6 +60,7 @@ def get_dashboard(
             "today_trades": today_trades,
             "recent_trades": [t.to_dict() for t in recent_trades],
             "market": overview,
+            "equity_curve": trading_engine.get_equity_curve(db, current_user.id),
         }
     }
 

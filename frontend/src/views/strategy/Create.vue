@@ -2,6 +2,7 @@
   <div>
     <el-card shadow="never">
       <template #header><span style="font-weight: bold">创建策略</span></template>
+<<<<<<< HEAD
       <el-form ref="formRef" :model="form" :rules="rules" label-width="100px" style="max-width: 600px" class="responsive-form">
         <el-form-item label="策略名称" prop="name">
           <el-input v-model="form.name" placeholder="输入策略名称" />
@@ -63,11 +64,15 @@
           <el-button @click="$router.back()">取消</el-button>
         </el-form-item>
       </el-form>
+=======
+      <StrategyCreateForm :prefill="prefill" variant="page" @cancel="router.back()" />
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     </el-card>
   </div>
 </template>
 
 <script setup>
+<<<<<<< HEAD
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { strategyApi } from '@/api/strategy'
@@ -82,17 +87,26 @@ const types = ref([])
 const symbols = ref([])
 const symbolLoading = ref(false)
 const remainingCash = ref(100000)
+=======
+import { computed } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import StrategyCreateForm from './StrategyCreateForm.vue'
 
-// Remote search — calls backend API on each keystroke for live Tencent lookup
-async function remoteSearchSymbols(query) {
-  if (!query || query.trim().length < 2) {
-    // Reload default list on clear
-    try {
-      const res = await marketApi.searchSymbols()
-      symbols.value = res.data || []
-    } catch {}
-    return
+const router = useRouter()
+const route = useRoute()
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+
+const prefill = computed(() => {
+  const q = route.query || {}
+  return {
+    strategy_type: q.strategy_type ? String(q.strategy_type) : undefined,
+    symbol: q.symbol ? String(q.symbol) : undefined,
+    symbol_name: q.symbol_name ? String(q.symbol_name) : undefined,
+    name: q.name ? String(q.name) : undefined,
+    description: q.description != null ? String(q.description) : undefined,
+    capital: q.capital != null ? Number(q.capital) : undefined,
   }
+<<<<<<< HEAD
   symbolLoading.value = true
   try {
     const res = await marketApi.searchSymbols(query.trim())
@@ -162,5 +176,7 @@ onMounted(async () => {
       remainingCash.value = cash
     }
   } catch (e) { console.error(e) }
+=======
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 })
 </script>

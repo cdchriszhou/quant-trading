@@ -7,6 +7,7 @@ import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import App from './App.vue'
 import router from './router'
 import { initStockNames } from './utils/stockNames'
+import StockTicker from './components/StockTicker.vue'
 
 async function bootstrap() {
   // Pre-load stock name map before app renders
@@ -18,6 +19,7 @@ async function bootstrap() {
   app.use(pinia)
   app.use(router)
   app.use(ElementPlus, { locale: zhCn })
+  app.component('StockTicker', StockTicker)
 
   for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
     app.component(key, component)

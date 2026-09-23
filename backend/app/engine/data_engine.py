@@ -2,11 +2,58 @@
 
 import collections
 import datetime
+import json
+import os
+import re
+import threading
 import time
 from typing import Optional
 
 import pandas as pd
 import httpx
+
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "*/*",
+}
+
+_EM_HOSTS = (
+    "https://push2delay.eastmoney.com",
+    "https://82.push2.eastmoney.com",
+    "https://80.push2.eastmoney.com",
+    "https://79.push2.eastmoney.com",
+    "https://88.push2.eastmoney.com",
+    "https://push2.eastmoney.com",
+)
+
+# History K-line hosts (push2his often drops connections; delay host is more stable)
+_EM_HIS_HOSTS = (
+    "https://push2delay.eastmoney.com",
+    "https://push2his.eastmoney.com",
+    "https://82.push2his.eastmoney.com",
+    "https://79.push2his.eastmoney.com",
+)
+
+# web.ifzq.gtimg.cn/fqkline returns 501 — do not use
+_TX_KLINE_ENDPOINTS = (
+    "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get",
+    "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get",
+)
+
+# Liquid A-share seed for avg-price / search when upstream lists are down
+_LIQUID_SEED_CODES = (
+    "600519.SH", "601318.SH", "600036.SH", "601166.SH", "600000.SH",
+    "601398.SH", "601288.SH", "601988.SH", "600030.SH", "601688.SH",
+    "000001.SZ", "000002.SZ", "000858.SZ", "000333.SZ", "000651.SZ",
+    "002415.SZ", "002594.SZ", "002304.SZ", "002142.SZ", "000568.SZ",
+    "300750.SZ", "300059.SZ", "300015.SZ", "300124.SZ", "300014.SZ",
+    "688981.SH", "688041.SH", "688256.SH", "688008.SH", "688111.SH",
+    "601012.SH", "600900.SH", "600276.SH", "600887.SH", "601888.SH",
+    "002475.SZ", "002371.SZ", "002230.SZ", "002460.SZ", "003816.SZ",
+)
 
 
 class _LRUCache:
@@ -68,21 +115,60 @@ class DataEngine:
             "quote": 3,
             "kline": 60,
             "index": 5,
+            "history": 120,
+            "sector": 60,
+            "top_movers": 45,
+            "insight": 90,
+            "company": 3600,
+            "news": 300,
         }
         self._last_request = 0.0
         self._min_interval = 0.3
         self._rate_lock = __import__('threading').Lock()
         self._http_client: Optional[httpx.Client] = None
+        self._industry_map: dict[str, list[str]] | None = None
+        self._industry_map_lock = threading.Lock()
 
-        self._symbols = self._build_symbol_list()
+        # Boot: disk cache first so EM outages don't break search / avg-price
+        self._symbols: list = []
+        self._symbols_source: str = "empty"
+        self._symbols_lock = threading.Lock()
+        self._symbol_cache_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "data",
+            "ashare_symbols.json",
+        )
+        cached = self._load_symbol_disk_cache()
+        if cached:
+            self._symbols = cached
+            self._symbols_source = "disk_cache"
+            print(f"[DataEngine] Loaded {len(cached)} symbols from disk cache")
+        print("[DataEngine] Initialized; refreshing A-share list in background…")
+        threading.Thread(target=self._async_load_symbols, name="em-stock-list", daemon=True).start()
 
-        print(f"[DataEngine] Initialized — real data from Tencent & East Money APIs")
+    def _async_load_symbols(self) -> None:
+        """Background load of full A-share list from East Money / Sina."""
+        try:
+            self.ensure_symbol_list(min_count=100)
+        except Exception as e:
+            print(f"[DataEngine] Async stock list failed: {e}")
+
+    def _async_full_sina_refresh(self) -> None:
+        """Fill remaining Sina pages after a partial ensure()."""
+        try:
+            full = self._fetch_sina_stock_list(max_pages=80)
+            if full and len(full) > len(self._symbols):
+                self._set_symbols(full, "sina")
+                print(f"[DataEngine] Sina full list ready: {len(full)}")
+        except Exception as e:
+            print(f"[DataEngine] Sina full refresh failed: {e}")
 
     # ── HTTP client ──────────────────────────────────────────────
 
     @property
     def http(self) -> httpx.Client:
         if self._http_client is None:
+<<<<<<< HEAD
             # Use connection pooling with keep-alive for better performance
             # limits: max 20 total connections, max 5 per host
             limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
@@ -93,6 +179,13 @@ class DataEngine:
                 follow_redirects=True,
                 limits=limits,
                 http2=False,  # Tencent/EastMoney APIs don't support HTTP/2
+=======
+            self._http_client = httpx.Client(
+                timeout=httpx.Timeout(8.0, connect=3.0),
+                verify=False,
+                follow_redirects=True,
+                headers=_DEFAULT_HEADERS,
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
             )
         return self._http_client
 
@@ -110,6 +203,87 @@ class DataEngine:
             self._last_request = time.time() + wait
         if wait > 0:
             time.sleep(wait)
+
+    def _reset_http_client(self) -> None:
+        """Drop pooled connections after upstream disconnects."""
+        client = self._http_client
+        self._http_client = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def _http_get(self, url: str, headers: dict | None = None, retries: int = 3) -> httpx.Response:
+        """GET with retry and backoff. Do not retry hard client/upstream rejections."""
+        merged = {**_DEFAULT_HEADERS, **(headers or {})}
+        last_error = None
+        for attempt in range(retries):
+            try:
+                self._rate_limit()
+                resp = self.http.get(url, headers=merged)
+                # 501 on dead Tencent hosts — fail immediately so caller can try next URL
+                if resp.status_code in (400, 401, 403, 404, 501):
+                    resp.raise_for_status()
+                resp.raise_for_status()
+                return resp
+            except Exception as e:
+                last_error = e
+                # Don't burn retries on permanent upstream rejections
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status in (400, 401, 403, 404, 501):
+                    break
+                # Connection drops poison the pool — recreate client before retry
+                err_name = type(e).__name__
+                err_msg = str(e).lower()
+                if "disconnect" in err_msg or "RemoteProtocol" in err_name or "Connection" in err_name:
+                    self._reset_http_client()
+                if attempt < retries - 1:
+                    time.sleep((attempt + 1) * 0.8)
+        raise last_error  # type: ignore[misc]
+
+    def _http_get_json(self, url: str, headers: dict | None = None, retries: int = 3) -> dict:
+        return self._http_get(url, headers=headers, retries=retries).json()
+
+    @staticmethod
+    def _parse_tencent_payload(text: str) -> dict:
+        """Parse Tencent K-line JSON or JSONP (`kline_dayqfq={...}`)."""
+        text = (text or "").strip()
+        if not text:
+            raise ValueError("empty tencent payload")
+        if text[0] in "{[":
+            return json.loads(text)
+        eq = text.find("={")
+        if eq >= 0:
+            return json.loads(text[eq + 1 :])
+        m = re.search(r"(\{.*\})\s*$", text, re.S)
+        if m:
+            return json.loads(m.group(1))
+        raise ValueError("unrecognized tencent payload")
+
+    def _em_his_get_json(self, path_query: str, retries: int = 2) -> dict:
+        """East Money history API with host failover."""
+        em_headers = {"Referer": "https://quote.eastmoney.com/"}
+        last_error = None
+        for host in _EM_HIS_HOSTS:
+            url = f"{host}{path_query}"
+            try:
+                return self._http_get_json(url, headers=em_headers, retries=retries)
+            except Exception as e:
+                last_error = e
+        raise last_error  # type: ignore[misc]
+
+    def _em_get_json(self, path_query: str, retries: int = 3) -> dict:
+        """East Money API with host failover."""
+        em_headers = {"Referer": "https://quote.eastmoney.com/"}
+        last_error = None
+        for host in _EM_HOSTS:
+            url = f"{host}{path_query}"
+            try:
+                return self._http_get_json(url, headers=em_headers, retries=retries)
+            except Exception as e:
+                last_error = e
+        raise last_error  # type: ignore[misc]
 
     # ── Symbol format conversion ─────────────────────────────────
 
@@ -130,6 +304,21 @@ class DataEngine:
         mid = "1" if parts[1].upper() == "SH" else "0"
         return f"{mid}.{parts[0]}"
 
+    @classmethod
+    def normalize_symbol(cls, symbol: str) -> str:
+        """Normalize user input to CODE.EXCHANGE (e.g. 301399 → 301399.SZ)."""
+        s = (symbol or "").strip().upper()
+        if not s:
+            return s
+        if "." in s:
+            code, exch = s.split(".", 1)
+            if exch in ("SH", "SZ", "BJ") and code.isdigit():
+                return f"{code}.{exch}"
+            return s
+        if s.isdigit() and len(s) == 6:
+            return cls._em_code_to_symbol(s)
+        return s
+
     # ── Cache helpers ────────────────────────────────────────────
 
     def _cache_get(self, key: str, ttl_key: str = "quote"):
@@ -141,13 +330,16 @@ class DataEngine:
     # ── Public API ───────────────────────────────────────────────
 
     def get_realtime_quote(self, symbol: str) -> dict:
-        """Get real-time quote from Tencent Finance."""
+        """Get real-time quote — Tencent first, East Money fallback."""
         q = self._fetch_tencent_quote(symbol)
+        if q is None:
+            q = self._fetch_em_quote(symbol)
         if q is None:
             raise RuntimeError(f"Failed to fetch real-time quote for {symbol}")
         q["data_source"] = "realtime"
         return q
 
+<<<<<<< HEAD
     def batch_get_quotes(self, symbols: list, max_batch: int = 50) -> dict:
         """Batch-fetch real-time quotes for multiple symbols.
 
@@ -178,11 +370,52 @@ class DataEngine:
                     v_prefix = line[:eq_pos]
                     tcode = v_prefix[2:] if v_prefix.startswith("v_") else v_prefix
                     raw = line[eq_pos + 1:].strip().strip('"').strip(";")
+=======
+    def get_realtime_quotes_batch(self, symbols: list) -> dict:
+        """Batch realtime quotes via Tencent (up to ~50/request).
+
+        Returns {symbol: quote_dict}. Missing symbols are omitted.
+        """
+        out: dict = {}
+        clean = []
+        seen = set()
+        for s in symbols or []:
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            clean.append(s)
+        if not clean:
+            return out
+
+        batch_size = 50
+        for i in range(0, len(clean), batch_size):
+            batch = clean[i : i + batch_size]
+            tcodes = [self._to_tencent(c) for c in batch]
+            url = f"https://qt.gtimg.cn/q={','.join(tcodes)}"
+            try:
+                resp = self._http_get(url)
+                text = resp.text or ""
+                for line in text.strip().split("\n"):
+                    if "=" not in line or "pv_none" in line:
+                        continue
+                    left, right = line.split("=", 1)
+                    tcode = left.strip().lstrip("v_")  # sz000001 / sh600519
+                    sym = self._tencent_code_to_symbol(tcode)
+                    if "." not in sym:
+                        # Fallback: map by bare code against requested batch
+                        bare = sym
+                        for req in batch:
+                            if req.split(".")[0] == bare:
+                                sym = req
+                                break
+                    raw = right.strip().strip('"').strip(";")
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                     fields = raw.split("~")
                     if len(fields) < 35:
                         continue
                     try:
                         name = fields[1]
+<<<<<<< HEAD
                         raw_code = fields[2]
                         price = float(fields[3]) if fields[3] else 0
                         pre_close = float(fields[4]) if fields[4] else 0
@@ -220,6 +453,36 @@ class DataEngine:
                 # Continue to next batch on error
 
         return all_quotes
+=======
+                        price = float(fields[3]) if fields[3] else 0.0
+                        pre_close = float(fields[4]) if fields[4] else 0.0
+                        open_p = float(fields[5]) if fields[5] else 0.0
+                        volume = int(float(fields[6])) if fields[6] else 0
+                        change_pct = (
+                            round((price - pre_close) / pre_close * 100, 2)
+                            if pre_close
+                            else 0.0
+                        )
+                        quote = {
+                            "symbol": sym,
+                            "name": name,
+                            "current_price": price,
+                            "open": open_p,
+                            "pre_close": pre_close,
+                            "change_pct": change_pct,
+                            "volume": volume,
+                            "data_source": "realtime",
+                        }
+                        out[sym] = quote
+                        self._cache_set(f"qt_{sym}", quote)
+                    except (ValueError, TypeError, IndexError):
+                        continue
+            except Exception as e:
+                print(f"[DataEngine] batch quote error: {e}")
+            if i + batch_size < len(clean):
+                time.sleep(0.05)
+        return out
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
     def get_kline_data(self, symbol: str, period: str = "1d", count: int = 100) -> list:
         """Get K-line data from East Money."""
@@ -228,11 +491,14 @@ class DataEngine:
             raise RuntimeError(f"Failed to fetch K-line for {symbol}")
         return kl
 
-    def get_history_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """Get historical daily data from East Money (with mock fallback)."""
+    def get_history_data(
+        self, symbol: str, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        """Get historical daily data from real market APIs. Never synthesizes OHLC."""
         df = self._fetch_em_history(symbol, start_date, end_date)
         if df is not None and not df.empty:
             return df
+<<<<<<< HEAD
         # API failed — generate mock data so backtesting still works
         print(f"[DataEngine] Falling back to mock data for {symbol} ({start_date} ~ {end_date})")
         return self._generate_mock_history(symbol, start_date, end_date)
@@ -364,6 +630,10 @@ class DataEngine:
                 "high": high, "low": low, "volume": volume,
             })
         return pd.DataFrame(rows)
+=======
+        print(f"[DataEngine] No history for {symbol} ({start_date} ~ {end_date}); returning empty")
+        return pd.DataFrame()
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
     def get_market_overview(self) -> dict:
         """Get market index overview from Tencent Finance."""
@@ -391,6 +661,12 @@ class DataEngine:
         if cached:
             return cached
 
+        try:
+            self.ensure_symbol_list()
+        except Exception as e:
+            print(f"[DataEngine] Avg price skipped (no real list): {e}")
+            return None
+
         # Build a representative sample: pick stocks spread across boards
         boards = {"main": [], "star": [], "chinext": [], "bse": []}
         for s in self._symbols:
@@ -399,7 +675,7 @@ class DataEngine:
                 boards[b].append(s)
         sample = boards["main"] + boards["star"] + boards["chinext"] + boards["bse"]
         if len(sample) < 20:
-            # Fallback: just use first 100 symbols
+            # Fallback: just use first 100 symbols from real list
             sample = self._symbols[:100]
         if not sample:
             return None
@@ -412,10 +688,9 @@ class DataEngine:
         for i in range(0, min(len(sample), 120), batch_size):
             batch = sample[i:i + batch_size]
             tcodes = [self._to_tencent(s["code"]) for s in batch]
-            url = f"http://qt.gtimg.cn/q={','.join(tcodes)}"
+            url = f"https://qt.gtimg.cn/q={','.join(tcodes)}"
             try:
-                self._rate_limit()
-                resp = self.http.get(url)
+                resp = self._http_get(url)
                 # Parse each v_tcode="..." line
                 for line in resp.text.strip().split("\n"):
                     if "=" not in line or "pv_none" in line:
@@ -435,7 +710,7 @@ class DataEngine:
             except Exception as e:
                 print(f"[DataEngine] Avg price batch error: {e}")
                 continue
-            time.sleep(0.3)
+            # _http_get already rate-limits; no extra sleep between batches
 
         if len(all_prices) < 10:
             return None
@@ -453,14 +728,24 @@ class DataEngine:
         return result
 
     def search_symbols(self, query: str = "") -> list:
-        """Search tradeable symbols — cached list first, live Tencent lookup for exact codes."""
+        """Search tradeable symbols — cached list + live Tencent for exact codes."""
+        try:
+            self.ensure_symbol_list(min_count=40)
+        except Exception as e:
+            print(f"[DataEngine] search_symbols list unavailable: {e}")
+
         if not query:
-            return self._symbols[:200]
+            if self._symbols:
+                return self._symbols[:200]
+            return self._liquid_seed_symbols()[:80]
 
         q = query.upper().strip()
-        results = [s for s in self._symbols
-                   if q in s["code"].upper() or q in s["name"]
-                   or q in s["code"].upper().replace(".SZ", "").replace(".SH", "")]
+        results = [
+            s for s in self._symbols
+            if q in s["code"].upper()
+            or q in s.get("name", "")
+            or q in s["code"].upper().replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
+        ]
 
         # If query looks like a 6-digit stock code and not in cache, try live Tencent lookup
         if not results and q.isdigit() and len(q) == 6:
@@ -481,15 +766,13 @@ class DataEngine:
             symbol = f"{code}.SZ"
 
         try:
-            self._rate_limit()
-            resp = self.http.get(f"http://qt.gtimg.cn/q={tcode}")
+            resp = self._http_get(f"https://qt.gtimg.cn/q={tcode}")
             text = resp.text.strip()
             if "=" not in text or "pv_none" in text:
                 # Try the other exchange
                 alt_tcode = f"sz{code}" if tcode.startswith("sh") else f"sh{code}"
                 alt_symbol = f"{code}.SZ" if symbol.endswith(".SH") else f"{code}.SH"
-                self._rate_limit()
-                resp2 = self.http.get(f"http://qt.gtimg.cn/q={alt_tcode}")
+                resp2 = self._http_get(f"https://qt.gtimg.cn/q={alt_tcode}")
                 text2 = resp2.text.strip()
                 if "=" in text2 and "pv_none" not in text2:
                     tcode, symbol = alt_tcode, alt_symbol
@@ -526,70 +809,203 @@ class DataEngine:
         return symbol
 
     def get_sectors(self, count: int = 30) -> list:
-        """Fetch mainstream industry sector data from Tencent Finance.
+        """Fetch mainstream industry sector data.
 
-        Returns a list of sectors sorted by change_pct descending, each containing:
-        {code, name, change_pct, leading_stock, leading_stock_change_pct, up_count, total_count}
+        Prefer Tencent board flow; fall back to Sina industry nodes when Tencent
+        returns too few / empty (common when bk payload shrinks).
         """
         cache_key = f"sectors_{count}"
-        cached = self._cache_get(cache_key, "index")
+        cached = self._cache_get(cache_key, "sector")
         if cached:
             return cached
 
+        combined = self._fetch_tencent_sectors(count)
+        if len(combined) < 10:
+            print(
+                f"[DataEngine] Tencent sectors thin ({len(combined)}); "
+                "falling back to Sina industries"
+            )
+            sina = self._fetch_sina_sectors(count)
+            if len(sina) > len(combined):
+                combined = sina
+
+        if combined:
+            self._cache_set(cache_key, combined)
+        return combined
+
+    def _fetch_tencent_sectors(self, count: int = 30) -> list:
+        """Tencent fund-flow plate list (may only return a handful of boards)."""
+        urls = (
+            f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/board/index?board=bk&p=1&ps={max(count, 30)}",
+            f"https://web.ifzq.gtimg.cn/appstock/app/board/index?board=bk&p=1&ps={max(count, 30)}",
+        )
+        last_err = None
+        for url in urls:
+            try:
+                resp = self._http_get(url, headers={"Referer": "https://gu.qq.com/"}, retries=2)
+                data = resp.json()
+                if data.get("code") != 0:
+                    print(f"[DataEngine] Sectors API error: code={data.get('code')}")
+                    continue
+
+                plate = data.get("data", {}).get("fundflow", {}).get("plate", {})
+                top_list = plate.get("top", []) or []
+                bottom_list = plate.get("bottom", []) or []
+
+                seen = set()
+                combined = []
+                for item in top_list + bottom_list:
+                    code = item.get("code", "")
+                    if not code or code in seen:
+                        continue
+                    seen.add(code)
+
+                    lzg = item.get("lzg", {}) or {}
+                    zgb = item.get("zgb", "/")
+                    parts = zgb.split("/") if zgb else ["0", "0"]
+                    up_count = int(parts[0]) if parts[0].isdigit() else 0
+                    total_count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                    lead_code = str(lzg.get("code") or "")
+                    if lead_code and "." not in lead_code:
+                        lead_code = self._from_tencent_code(lead_code)
+
+                    combined.append({
+                        "code": code,
+                        "name": item.get("name", ""),
+                        "change_pct": round(float(item.get("zdf", 0) or 0), 2),
+                        "leading_stock": lzg.get("name", ""),
+                        "leading_stock_code": lead_code,
+                        "leading_stock_change_pct": round(float(lzg.get("zdf", 0) or 0), 2),
+                        "up_count": up_count,
+                        "total_count": total_count,
+                        "source": "tencent",
+                    })
+
+                combined.sort(key=lambda x: x["change_pct"], reverse=True)
+                return combined[:count]
+            except Exception as e:
+                last_err = e
+                continue
+        if last_err:
+            print(f"[DataEngine] Tencent sectors fetch error: {last_err}")
+        return []
+
+    def _sina_industry_nodes(self) -> list[tuple[str, str]]:
+        """Return [(name, node_code), ...] from Sina Market_Center.getHQNodes."""
         url = (
-            "https://web.ifzq.gtimg.cn/appstock/app/board/index"
-            f"?board=bk&p=1&ps={count}"
+            "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            "Market_Center.getHQNodes"
         )
         try:
-            self._rate_limit()
-            resp = self.http.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                "Referer": "http://gu.qq.com/",
-            })
-            data = resp.json()
-            if data.get("code") != 0:
-                print(f"[DataEngine] Sectors API error: code={data.get('code')}")
-                return []
-
-            plate = data.get("data", {}).get("fundflow", {}).get("plate", {})
-            top_list = plate.get("top", [])
-            bottom_list = plate.get("bottom", [])
-
-            # Combine top and bottom, deduplicate by code
-            seen = set()
-            combined = []
-            for item in top_list + bottom_list:
-                code = item.get("code", "")
-                if code in seen:
-                    continue
-                seen.add(code)
-
-                lzg = item.get("lzg", {}) or {}
-                # Parse up_count/total_count from "zgb" field (format: "143/173")
-                zgb = item.get("zgb", "/")
-                parts = zgb.split("/") if zgb else ["0", "0"]
-                up_count = int(parts[0]) if parts[0].isdigit() else 0
-                total_count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-
-                combined.append({
-                    "code": code,
-                    "name": item.get("name", ""),
-                    "change_pct": round(float(item.get("zdf", 0) or 0), 2),
-                    "leading_stock": lzg.get("name", ""),
-                    "leading_stock_code": lzg.get("code", ""),
-                    "leading_stock_change_pct": round(float(lzg.get("zdf", 0) or 0), 2),
-                    "up_count": up_count,
-                    "total_count": total_count,
-                })
-
-            # Sort by change_pct descending
-            combined.sort(key=lambda x: x["change_pct"], reverse=True)
-
-            self._cache_set(cache_key, combined)
-            return combined
+            resp = self._http_get(
+                url,
+                headers={**_DEFAULT_HEADERS, "Referer": "https://finance.sina.com.cn/"},
+                retries=2,
+            )
+            nodes = resp.json()
         except Exception as e:
-            print(f"[DataEngine] Sectors fetch error: {e}")
+            print(f"[DataEngine] Sina industry nodes failed: {e}")
             return []
+
+        out: list[tuple[str, str]] = []
+
+        def walk(node):
+            if isinstance(node, list):
+                if (
+                    len(node) >= 3
+                    and isinstance(node[0], str)
+                    and isinstance(node[2], str)
+                    and str(node[2]).startswith("new_")
+                ):
+                    out.append((node[0], node[2]))
+                for child in node:
+                    walk(child)
+
+        walk(nodes)
+        return out
+
+    def _fetch_sina_sector_snapshot(self, name: str, node: str) -> dict | None:
+        """One Sina industry: avg change of top page + leading gainer."""
+        url = (
+            "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            "Market_Center.getHQNodeData"
+            f"?page=1&num=40&sort=changepercent&asc=0&node={node}"
+        )
+        try:
+            resp = self._http_get(
+                url,
+                headers={**_DEFAULT_HEADERS, "Referer": "https://finance.sina.com.cn/"},
+                retries=2,
+            )
+            rows = resp.json()
+        except Exception:
+            return None
+        if not isinstance(rows, list) or not rows:
+            return None
+
+        changes = []
+        up = 0
+        for row in rows:
+            try:
+                chg = float(row.get("changepercent") or 0)
+            except (TypeError, ValueError):
+                continue
+            changes.append(chg)
+            if chg > 0:
+                up += 1
+        if not changes:
+            return None
+
+        lead = rows[0]
+        lead_code = str(lead.get("code") or "")
+        lead_sym = str(lead.get("symbol") or "").lower()
+        if lead_sym.startswith("sh"):
+            lead_full = f"{lead_code}.SH"
+        elif lead_sym.startswith("sz"):
+            lead_full = f"{lead_code}.SZ"
+        elif lead_sym.startswith("bj"):
+            lead_full = f"{lead_code}.BJ"
+        else:
+            lead_full = self._em_code_to_symbol(lead_code) if lead_code else ""
+
+        avg = sum(changes) / len(changes)
+        return {
+            "code": node,
+            "name": name,
+            "change_pct": round(avg, 2),
+            "leading_stock": lead.get("name") or "",
+            "leading_stock_code": lead_full,
+            "leading_stock_change_pct": round(float(lead.get("changepercent") or 0), 2),
+            "up_count": up,
+            "total_count": len(rows),
+            "source": "sina",
+        }
+
+    def _fetch_sina_sectors(self, count: int = 30) -> list:
+        """Build sector list from Sina 新浪行业 nodes (parallel snapshots)."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        nodes = self._sina_industry_nodes()
+        if not nodes:
+            return []
+
+        results: list = []
+        # Cap workers to avoid hammering Sina
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futs = {
+                pool.submit(self._fetch_sina_sector_snapshot, name, node): node
+                for name, node in nodes
+            }
+            for fut in as_completed(futs):
+                try:
+                    snap = fut.result()
+                except Exception:
+                    snap = None
+                if snap:
+                    results.append(snap)
+
+        results.sort(key=lambda x: x["change_pct"], reverse=True)
+        return results[:count]
 
     # ── Industry / Sector Stocks ────────────────────────────────────
 
@@ -601,22 +1017,28 @@ class DataEngine:
         Returns dict like:
         {"化学制药": ["000001.SZ", "000002.SZ", ...], ...}
         """
-        # Use instance variable for session-lifetime caching
-        if hasattr(self, "_industry_map") and self._industry_map:
+        if self._industry_map:
             return self._industry_map
 
+<<<<<<< HEAD
         industry_map: dict[str, list[str]] = {}
         page_size = 500  # Larger page size → fewer HTTP requests (~11 vs ~28)
         max_pages = 15
+=======
+        with self._industry_map_lock:
+            if self._industry_map:
+                return self._industry_map
 
-        for page in range(1, max_pages + 1):
-            url = (
-                f"https://push2.eastmoney.com/api/qt/clist/get"
-                f"?pn={page}&pz={page_size}&po=1&np=1&fltt=2&invt=2"
-                f"&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
-                f"&fields=f12,f100"
-            )
+            industry_map: dict[str, list[str]] = {}
+            page_size = 100  # smaller pages = less disconnect risk
+            max_pages = 60
+            failed_pages: list[int] = []
+            prev_interval = self._min_interval
+            self._min_interval = 0.45  # gentler on East Money during bulk crawl
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+
             try:
+<<<<<<< HEAD
                 # East Money is more generous with rate limits — use 0.1s for bulk ops
                 self._rate_limit(min_interval=0.1)
                 resp = self.http.get(url, headers={
@@ -627,28 +1049,63 @@ class DataEngine:
                 items = data.get("data", {}).get("diff", [])
                 if not items:
                     break
+=======
+                for page in range(1, max_pages + 1):
+                    path = (
+                        f"/api/qt/clist/get"
+                        f"?pn={page}&pz={page_size}&po=1&np=1&fltt=2&invt=2"
+                        f"&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+                        f"&fields=f12,f100"
+                    )
+                    data = None
+                    last_err = None
+                    for attempt in range(3):
+                        try:
+                            data = self._em_get_json(path, retries=2)
+                            break
+                        except Exception as e:
+                            last_err = e
+                            time.sleep(0.6 * (attempt + 1))
+                    if data is None:
+                        print(f"[DataEngine] Industry map page {page} failed: {last_err}")
+                        failed_pages.append(page)
+                        continue
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
-                for item in items:
-                    code = str(item.get("f12", ""))
-                    industry = str(item.get("f100", "")).strip()
-                    if code and industry and len(code) == 6:
-                        symbol = self._em_code_to_symbol(code)
-                        if industry not in industry_map:
-                            industry_map[industry] = []
-                        industry_map[industry].append(symbol)
+                    items = data.get("data", {}).get("diff", [])
+                    if not items:
+                        break
 
-                total = data.get("data", {}).get("total", 0)
-                if page * page_size >= total:
-                    break
-            except Exception as e:
-                print(f"[DataEngine] Industry map page {page} failed: {e}")
-                break
+                    for item in items:
+                        code = str(item.get("f12", ""))
+                        industry = str(item.get("f100", "")).strip()
+                        if code and industry and len(code) == 6:
+                            symbol = self._em_code_to_symbol(code)
+                            industry_map.setdefault(industry, []).append(symbol)
 
-        if industry_map:
-            self._industry_map = industry_map
-            print(f"[DataEngine] Industry map built: {len(industry_map)} industries, "
-                  f"{sum(len(v) for v in industry_map.values())} stocks")
-        return industry_map
+                    total = data.get("data", {}).get("total", 0)
+                    if page * page_size >= total:
+                        break
+            finally:
+                self._min_interval = prev_interval
+
+            stock_count = sum(len(v) for v in industry_map.values())
+            # Only cache when reasonably complete; otherwise next call will rebuild
+            if stock_count >= 2000 and len(failed_pages) <= 3:
+                self._industry_map = industry_map
+                print(
+                    f"[DataEngine] Industry map built: {len(industry_map)} industries, "
+                    f"{stock_count} stocks"
+                    + (f" (skipped pages: {failed_pages})" if failed_pages else "")
+                )
+            elif industry_map:
+                print(
+                    f"[DataEngine] Industry map incomplete "
+                    f"({stock_count} stocks, failed pages {failed_pages}); not caching"
+                )
+            else:
+                print("[DataEngine] Industry map empty after crawl")
+            return industry_map
 
     @staticmethod
     def _match_industry(sector_name: str, industry_names: list[str]) -> str | None:
@@ -685,6 +1142,7 @@ class DataEngine:
 
         return None
 
+<<<<<<< HEAD
     def _build_sina_industry_map(self) -> dict[str, str]:
         """Build Sina Finance industry name → node code map (fallback data source)."""
         if hasattr(self, "_sina_industry_map") and self._sina_industry_map:
@@ -759,6 +1217,168 @@ class DataEngine:
                 }, timeout=15)
                 items = resp.json()
                 if not items:
+=======
+    @staticmethod
+    def _from_tencent_code(tcode: str) -> str:
+        """sh600519 → 600519.SH | sz000001 → 000001.SZ"""
+        t = (tcode or "").strip().lower()
+        if t.startswith("sh") and len(t) >= 8:
+            return f"{t[2:]}.SH"
+        if t.startswith("sz") and len(t) >= 8:
+            return f"{t[2:]}.SZ"
+        if t.startswith("bj") and len(t) >= 8:
+            return f"{t[2:]}.BJ"
+        return tcode
+
+    def _fetch_tencent_board_stocks(self, board_code: str, count: int = 100) -> list:
+        """Fetch sector constituents from Tencent board rank API (stable)."""
+        code = (board_code or "").strip()
+        if code.startswith("bkpt"):
+            code = code[2:]
+        if not code:
+            return []
+
+        page_size = min(max(int(count), 1), 100)
+        url = (
+            "https://proxy.finance.qq.com/cgi/cgi-bin/rank/hs/getBoardRankList"
+            f"?board_code={code}&_appver=11.17.0&offset=0&count={page_size}"
+            f"&sort_type=volume&direct=down"
+        )
+        try:
+            resp = self._http_get(url, headers={"Referer": "https://gu.qq.com/"}, retries=2)
+            payload = resp.json()
+            if payload.get("code") != 0:
+                print(f"[DataEngine] Board stocks API error: {payload.get('msg')}")
+                return []
+            rows = (payload.get("data") or {}).get("rank_list") or []
+            stocks = []
+            for item in rows:
+                symbol = self._from_tencent_code(str(item.get("code") or ""))
+                if not symbol or "." not in symbol:
+                    continue
+                try:
+                    price = float(item.get("zxj") or 0)
+                    change_pct = float(item.get("zdf") or 0)
+                    volume = int(float(item.get("volume") or 0))
+                    amount_raw = float(item.get("turnover") or 0)
+                except (TypeError, ValueError):
+                    continue
+                pre_close = round(price / (1 + change_pct / 100), 2) if change_pct != -100 else price
+                stocks.append({
+                    "code": symbol,
+                    "name": item.get("name") or "",
+                    "price": round(price, 2),
+                    "change_pct": round(change_pct, 2),
+                    "volume": volume,
+                    "amount": round(amount_raw / 10000.0, 2) if amount_raw > 10000 else amount_raw,
+                    "high": round(price, 2),
+                    "low": round(price, 2),
+                    "open": round(price, 2),
+                    "pre_close": pre_close,
+                })
+            stocks.sort(key=lambda x: x["change_pct"], reverse=True)
+            return stocks[:count]
+        except Exception as e:
+            print(f"[DataEngine] Board stocks fetch error ({code}): {e}")
+            return []
+
+    def _fetch_sina_board_stocks(self, node: str, count: int = 100) -> list:
+        """Fetch constituents for a Sina industry node (new_xxx)."""
+        node = (node or "").strip()
+        if not node.startswith("new_"):
+            return []
+        stocks = []
+        page = 1
+        page_size = 80
+        while len(stocks) < count and page <= 5:
+            url = (
+                "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                "Market_Center.getHQNodeData"
+                f"?page={page}&num={page_size}&sort=changepercent&asc=0&node={node}"
+            )
+            try:
+                resp = self._http_get(
+                    url,
+                    headers={**_DEFAULT_HEADERS, "Referer": "https://finance.sina.com.cn/"},
+                    retries=2,
+                )
+                rows = resp.json()
+            except Exception as e:
+                print(f"[DataEngine] Sina board stocks page {page} failed: {e}")
+                break
+            if not isinstance(rows, list) or not rows:
+                break
+            for row in rows:
+                code = str(row.get("code") or "").strip()
+                name = str(row.get("name") or "").strip()
+                sym_raw = str(row.get("symbol") or "").strip().lower()
+                if not code or len(code) != 6:
+                    continue
+                if sym_raw.startswith("sh"):
+                    symbol = f"{code}.SH"
+                elif sym_raw.startswith("sz"):
+                    symbol = f"{code}.SZ"
+                elif sym_raw.startswith("bj"):
+                    symbol = f"{code}.BJ"
+                else:
+                    symbol = self._em_code_to_symbol(code)
+                try:
+                    price = float(row.get("trade") or 0)
+                    change_pct = float(row.get("changepercent") or 0)
+                    volume = int(float(row.get("volume") or 0))
+                    amount = float(row.get("amount") or 0)
+                    high = float(row.get("high") or price)
+                    low = float(row.get("low") or price)
+                    open_p = float(row.get("open") or price)
+                    pre_close = float(row.get("settlement") or 0)
+                except (TypeError, ValueError):
+                    continue
+                stocks.append({
+                    "code": symbol,
+                    "name": name,
+                    "price": round(price, 2),
+                    "change_pct": round(change_pct, 2),
+                    "volume": volume,
+                    "amount": round(amount / 1e8, 2) if amount > 1e6 else round(amount, 2),
+                    "high": round(high, 2),
+                    "low": round(low, 2),
+                    "open": round(open_p, 2),
+                    "pre_close": round(pre_close, 2),
+                })
+                if len(stocks) >= count:
+                    break
+            page += 1
+            time.sleep(0.08)
+        stocks.sort(key=lambda x: x["change_pct"], reverse=True)
+        return stocks[:count]
+
+    def get_sector_stocks(self, board_code: str, count: int = 100) -> list:
+        """Fetch constituent stocks for a given sector/board code.
+
+        Primary: Tencent board rank / Sina industry node.
+        Fallback: East Money industry-name map + batch quotes.
+        """
+        cache_key = f"sector_stocks_{board_code}_{count}"
+        cached = self._cache_get(cache_key, "sector")
+        if cached:
+            return cached
+
+        code = (board_code or "").strip()
+        if code.startswith("new_"):
+            stocks = self._fetch_sina_board_stocks(code, count)
+        else:
+            stocks = self._fetch_tencent_board_stocks(code, count)
+        if stocks:
+            self._cache_set(cache_key, stocks)
+            return stocks
+
+        # Fallback — sector name → East Money industry map
+        sector_name = None
+        try:
+            for s in self.get_sectors(100):
+                if s.get("code") == board_code:
+                    sector_name = s.get("name", "")
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                     break
 
                 for item in items:
@@ -775,6 +1395,7 @@ class DataEngine:
                         change_pct = 0.0
                     pre_close = round(price / (1 + change_pct / 100), 2) if price and change_pct else price
 
+<<<<<<< HEAD
                     stocks.append({
                         "code": code,
                         "name": str(item.get("name", "")),
@@ -789,6 +1410,12 @@ class DataEngine:
                     })
                     if len(stocks) >= count:
                         break
+=======
+        industry_map = self._build_industry_map()
+        if not industry_map:
+            print("[DataEngine] Industry map is empty, cannot get sector stocks")
+            return []
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
                 if len(items) < page_size:
                     break
@@ -800,6 +1427,7 @@ class DataEngine:
         stocks.sort(key=lambda x: x["change_pct"], reverse=True)
         return stocks[:count]
 
+<<<<<<< HEAD
     def _batch_tencent_quotes(self, stock_codes: list) -> list:
         """Batch-fetch real-time quotes from Tencent for a list of stock codes."""
         stocks = []
@@ -919,6 +1547,30 @@ class DataEngine:
 
         stocks = self._fetch_sector_stocks_by_name(sector_name, count)
         self._cache_set(cache_key, stocks)
+=======
+        quotes = self.get_realtime_quotes_batch(stock_codes) or {}
+        stocks = []
+        for sym in stock_codes:
+            q = quotes.get(sym)
+            if not q:
+                continue
+            price = float(q.get("current_price") or 0)
+            stocks.append({
+                "code": sym,
+                "name": q.get("name") or "",
+                "price": round(price, 2),
+                "change_pct": round(float(q.get("change_pct") or 0), 2),
+                "volume": int(q.get("volume") or 0),
+                "amount": float(q.get("amount") or 0),
+                "high": round(float(q.get("high") or price), 2),
+                "low": round(float(q.get("low") or price), 2),
+                "open": round(float(q.get("open") or price), 2),
+                "pre_close": round(float(q.get("pre_close") or 0), 2),
+            })
+        stocks.sort(key=lambda x: x["change_pct"], reverse=True)
+        if stocks:
+            self._cache_set(cache_key, stocks)
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         return stocks
 
     # ═══════════════════════════════════════════════════════════════
@@ -935,6 +1587,11 @@ class DataEngine:
         Returns dict with 'gainers' and 'losers' lists, each containing:
         {code, name, price, change_pct, market}
         """
+        cache_key = f"top_movers_{market}_{count}"
+        cached = self._cache_get(cache_key, "top_movers")
+        if cached:
+            return cached
+
         result = {"gainers": [], "losers": []}
         # Build pool: filter by market; expand to 500 for 'all' for better coverage
         pool = self._symbols[:500] if market == "all" else self._symbols
@@ -949,10 +1606,9 @@ class DataEngine:
         for i in range(0, min(len(pool), 300), batch_size):
             batch = pool[i:i + batch_size]
             tcodes = [self._to_tencent(s["code"]) for s in batch]
-            url = f"http://qt.gtimg.cn/q={','.join(tcodes)}"
+            url = f"https://qt.gtimg.cn/q={','.join(tcodes)}"
             try:
-                self._rate_limit()
-                resp = self.http.get(url)
+                resp = self._http_get(url)
                 text = resp.text
                 # Parse each line: v_tcode="...fields..."
                 for line in text.strip().split("\n"):
@@ -982,8 +1638,7 @@ class DataEngine:
             except Exception as e:
                 print(f"[DataEngine] Top movers batch error: {e}")
                 continue
-            # Small delay between batches
-            time.sleep(0.3)
+            # _http_get already rate-limits; no extra sleep between batches
 
         if not all_quotes:
             return result
@@ -1004,6 +1659,7 @@ class DataEngine:
         result["gainers"] = gainers[:count]
         result["losers"] = losers[:count] if losers else []
 
+        self._cache_set(cache_key, result)
         return result
 
     @staticmethod
@@ -1042,9 +1698,7 @@ class DataEngine:
 
         try:
             tcode = self._to_tencent(symbol)
-            url = f"http://qt.gtimg.cn/q={tcode}"
-            self._rate_limit()
-            resp = self.http.get(url)
+            resp = self._http_get(f"https://qt.gtimg.cn/q={tcode}")
             text = resp.text.strip()
 
             if "=" not in text:
@@ -1090,6 +1744,64 @@ class DataEngine:
             print(f"[DataEngine] Tencent API error for {symbol}: {e}")
             return None
 
+    def _fetch_em_quote(self, symbol: str) -> Optional[dict]:
+        """East Money single-stock quote fallback (push2delay)."""
+        cache_key = f"em_qt_{symbol}"
+        cached = self._cache_get(cache_key, "quote")
+        if cached:
+            return cached
+        bare = symbol.split(".")[0]
+        market = "1" if symbol.endswith(".SH") or bare.startswith(("5", "6", "9")) else "0"
+        path = (
+            f"/api/qt/stock/get?secid={market}.{bare}"
+            f"&fields=f43,f44,f45,f46,f47,f48,f57,f58,f60,f169,f170"
+        )
+        try:
+            data = self._em_get_json(path, retries=2)
+            d = (data or {}).get("data") or {}
+            if not d:
+                return None
+            # EM prices are often ×100 integers
+            def px(key, default=0):
+                v = d.get(key, default)
+                try:
+                    n = float(v)
+                except (TypeError, ValueError):
+                    return 0.0
+                return n / 100.0 if abs(n) > 1000 or (n == int(n) and abs(n) >= 100) else n
+
+            current = px("f43")
+            pre_close = px("f60") or px("f46")
+            if current <= 0 and pre_close <= 0:
+                return None
+            if current <= 0:
+                current = pre_close
+            open_p = px("f46") or current
+            high = px("f44") or current
+            low = px("f45") or current
+            volume = int(float(d.get("f47") or 0))
+            change = round(current - pre_close, 2) if pre_close else 0
+            change_pct = round((current - pre_close) / pre_close * 100, 2) if pre_close else 0
+            quote = {
+                "symbol": symbol,
+                "name": str(d.get("f58") or ""),
+                "current_price": current,
+                "open": open_p,
+                "high": high,
+                "low": low,
+                "pre_close": pre_close,
+                "change": change,
+                "change_pct": change_pct,
+                "volume": volume,
+                "amount": round(float(d.get("f48") or 0) / 1e8, 2) if d.get("f48") else 0,
+                "timestamp": datetime.datetime.now().isoformat(),
+            }
+            self._cache_set(cache_key, quote)
+            return quote
+        except Exception as e:
+            print(f"[DataEngine] EM quote fallback error for {symbol}: {e}")
+            return None
+
     def _fetch_real_indices(self) -> Optional[list]:
         """Fetch real market indices from Tencent."""
         targets = [
@@ -1102,9 +1814,7 @@ class DataEngine:
         ok = False
         for tcode, name, code in targets:
             try:
-                url = f"http://qt.gtimg.cn/q={tcode}"
-                self._rate_limit()
-                resp = self.http.get(url)
+                resp = self._http_get(f"https://qt.gtimg.cn/q={tcode}")
                 text = resp.text.strip()
                 if "=" not in text:
                     print(f"[DataEngine] Unexpected index response for {tcode}: {text[:100]}")
@@ -1130,6 +1840,50 @@ class DataEngine:
             return symbol.lower()
         return f"{parts[1].lower()}{parts[0]}"
 
+    def _fetch_tencent_kline_payload(
+        self, tcode: str, tperiod: str, count: int, adjust: str = "qfq"
+    ) -> Optional[dict]:
+        """Hit working Tencent K-line endpoints; return parsed stock/board node or None."""
+        count = max(1, min(int(count), 640))
+        # Board indices (pt*/bk*) often reject qfq — try plain day as well
+        is_board = tcode.startswith(("pt", "bk"))
+        adjust_opts = [adjust, ""] if is_board and adjust else [adjust]
+        headers = {"Referer": "https://finance.qq.com/"}
+        last_error = None
+
+        for adj in adjust_opts:
+            adj_part = adj if adj is not None else ""
+            param = f"{tcode},{tperiod},,,{count},{adj_part}"
+            for base in _TX_KLINE_ENDPOINTS:
+                url = f"{base}?_var=kline_{tperiod}{adj_part or 'raw'}&param={param}"
+                try:
+                    resp = self._http_get(url, headers=headers, retries=1)
+                    data = self._parse_tencent_payload(resp.text)
+                    if not isinstance(data, dict):
+                        raise RuntimeError("tencent payload not dict")
+                    if data.get("code") != 0:
+                        raise RuntimeError(f"tencent code={data.get('code')}")
+                    raw_data = data.get("data")
+                    if isinstance(raw_data, list) or not raw_data:
+                        # param error / empty — try next adjust/endpoint
+                        raise RuntimeError(data.get("msg") or "empty data")
+                    stock = raw_data.get(tcode)
+                    if isinstance(stock, dict) and (
+                        stock.get(f"qfq{tperiod}")
+                        or stock.get(tperiod)
+                        or stock.get("qfqday")
+                        or stock.get("day")
+                    ):
+                        return stock
+                    raise RuntimeError("empty kline node")
+                except Exception as e:
+                    last_error = e
+                    continue
+        # Board misses are common with wrong codes — keep log short
+        if last_error and not tcode.startswith(("pt", "bk")):
+            print(f"[DataEngine] Tencent kline failed for {tcode}: {last_error}")
+        return None
+
     def _fetch_tencent_kline(self, symbol: str, period: str, count: int) -> Optional[list]:
         """Fetch K-line data from Tencent Finance (primary source).
 
@@ -1147,54 +1901,32 @@ class DataEngine:
                       "30m": "m30", "60m": "m60", "5m": "m5", "15m": "m15"}
         tperiod = period_map.get(period, "day")
 
-        url = (f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-               f"?param={tcode},{tperiod},,,{count},qfq")
-
-        try:
-            self._rate_limit()
-            resp = self.http.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            if not isinstance(data, dict):
-                print(f"[DataEngine] Tencent kline unexpected type for {symbol}: {type(data)}")
-                return None
-            if data.get("code") != 0:
-                print(f"[DataEngine] Tencent kline API error for {symbol}: code={data.get('code')}")
-                return None
-
-            stock_data = data.get("data", {})
-            if not isinstance(stock_data, dict):
-                return None
-            stock_data = stock_data.get(tcode, {})
-            if not isinstance(stock_data, dict):
-                stock_data = {}
-            ktype = f"qfq{tperiod}"  # 前复权日K
-            klines_raw = stock_data.get(ktype, [])
-            if not klines_raw:
-                # Try without 前复权
-                klines_raw = stock_data.get(tperiod, [])
-
-            if not klines_raw:
-                print(f"[DataEngine] Tencent empty kline for {symbol}")
-                return None
-
-            klines = []
-            for row in klines_raw:
-                if len(row) >= 6:
-                    klines.append({
-                        "date": str(row[0])[:10],
-                        "open": round(float(row[1]), 2),
-                        "close": round(float(row[2]), 2),
-                        "high": round(float(row[3]), 2),
-                        "low": round(float(row[4]), 2),
-                        "volume": int(float(row[5])),
-                    })
-
-            self._cache_set(cache_key, klines)
-            return klines
-        except Exception as e:
-            print(f"[DataEngine] Tencent kline error for {symbol}: {e}")
+        stock_data = self._fetch_tencent_kline_payload(tcode, tperiod, count)
+        if not stock_data:
             return None
+
+        ktype = f"qfq{tperiod}"  # 前复权日K
+        klines_raw = stock_data.get(ktype, [])
+        if not klines_raw:
+            klines_raw = stock_data.get(tperiod, [])
+        if not klines_raw:
+            print(f"[DataEngine] Tencent empty kline for {symbol}")
+            return None
+
+        klines = []
+        for row in klines_raw:
+            if len(row) >= 6:
+                klines.append({
+                    "date": str(row[0])[:10],
+                    "open": round(float(row[1]), 2),
+                    "close": round(float(row[2]), 2),
+                    "high": round(float(row[3]), 2),
+                    "low": round(float(row[4]), 2),
+                    "volume": int(float(row[5])),
+                })
+
+        self._cache_set(cache_key, klines)
+        return klines
 
     def _fetch_em_kline(self, symbol: str, period: str, count: int) -> Optional[list]:
         """Fetch K-line data — Tencent first, East Money fallback."""
@@ -1214,157 +1946,120 @@ class DataEngine:
         klt = klt_map.get(period, "101")
         today_str = datetime.datetime.now().strftime("%Y%m%d")
 
-        url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
-               f"?secid={secid}&fields1=f1,f2,f3"
-               f"&fields2=f51,f52,f53,f54,f55,f56,f57"
-               f"&klt={klt}&fqt=1&end={today_str}&lmt={count}")
-
-        last_error = None
-        for attempt in range(2):
-            try:
-                self._rate_limit()
-                resp = self.http.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-                klines_raw = data.get("data", {}).get("klines", [])
-                if not klines_raw:
-                    return None
-                klines = []
-                for line in klines_raw:
-                    parts = line.split(",")
-                    if len(parts) >= 6:
-                        klines.append({
-                            "date": parts[0],
-                            "open": round(float(parts[1]), 2),
-                            "close": round(float(parts[2]), 2),
-                            "high": round(float(parts[3]), 2),
-                            "low": round(float(parts[4]), 2),
-                            "volume": int(float(parts[5])),
-                        })
-                return klines
-            except Exception as e:
-                last_error = e
-                if attempt < 1:
-                    time.sleep(1.5)
-        print(f"[DataEngine] EM kline failed for {symbol}: {last_error}")
-        return None
+        try:
+            data = self._em_his_get_json(
+                f"/api/qt/stock/kline/get"
+                f"?secid={secid}&fields1=f1,f2,f3"
+                f"&fields2=f51,f52,f53,f54,f55,f56,f57"
+                f"&klt={klt}&fqt=1&end={today_str}&lmt={count}",
+                retries=2,
+            )
+            klines_raw = (data.get("data") or {}).get("klines", [])
+            if not klines_raw:
+                return None
+            klines = []
+            for line in klines_raw:
+                parts = line.split(",")
+                if len(parts) >= 6:
+                    klines.append({
+                        "date": parts[0],
+                        "open": round(float(parts[1]), 2),
+                        "close": round(float(parts[2]), 2),
+                        "high": round(float(parts[3]), 2),
+                        "low": round(float(parts[4]), 2),
+                        "volume": int(float(parts[5])),
+                    })
+            return klines
+        except Exception as e:
+            print(f"[DataEngine] EM kline failed for {symbol}: {e}")
+            return None
 
     def _fetch_em_history(self, symbol: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """Fetch historical daily data — Tencent first, East Money fallback."""
+        """Fetch historical daily data — Tencent (proxy) first, East Money fallback."""
+        cache_key = f"hist_{symbol}_{start_date}_{end_date}"
+        cached = self._cache_get(cache_key, "history")
+        if cached is not None:
+            return cached if isinstance(cached, pd.DataFrame) else pd.DataFrame(cached)
+
         tcode = self._to_tencent_kline_code(symbol)
-        # Calculate how many trading days we need
         try:
             sd = datetime.datetime.strptime(start_date, "%Y-%m-%d")
             ed = datetime.datetime.strptime(end_date, "%Y-%m-%d")
-            count = max(365, int((ed - sd).days * 1.4))  # Include weekends buffer
+            # Tencent returns the most recent N bars (not a calendar window).
+            # Request enough bars to cover from start_date through today.
+            days_back = max((datetime.datetime.now() - sd).days, (ed - sd).days, 1)
+            count = min(640, max(120, int(days_back * 0.75) + 40))
         except Exception:
-            count = 1000
+            count = 320
 
-        url = (f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-               f"?param={tcode},day,,,{count},qfq")
-
-        last_error = None
-        for attempt in range(3):
-            try:
-                self._rate_limit()
-                resp = self.http.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-                if not isinstance(data, dict):
-                    raise RuntimeError(f"Tencent API returned unexpected type: {type(data)}")
-                if data.get("code") != 0:
-                    raise RuntimeError(f"Tencent API code={data.get('code')}")
-
-                stock_data = data.get("data", {})
-                if not isinstance(stock_data, dict):
-                    raise RuntimeError(f"Tencent API data is not dict: {type(stock_data)}")
-                stock_data = stock_data.get(tcode, {})
-                if not isinstance(stock_data, dict):
-                    stock_data = {}
-                klines_raw = stock_data.get("qfqday") or stock_data.get("day") or []
-                if not klines_raw:
-                    print(f"[DataEngine] Tencent empty history for {symbol}")
-                    return pd.DataFrame()
-
-                rows = []
-                for row in klines_raw:
-                    if len(row) >= 6:
-                        ds = str(row[0])[:10]
-                        if start_date <= ds <= end_date:
-                            rows.append({
-                                "date": ds,
-                                "open": round(float(row[1]), 2),
-                                "close": round(float(row[2]), 2),
-                                "high": round(float(row[3]), 2),
-                                "low": round(float(row[4]), 2),
-                                "volume": int(float(row[5])),
-                            })
-                if rows:
-                    return pd.DataFrame(rows)
-                # No matching date range — return what we have unfiltered
-                print(f"[DataEngine] Tencent history date-mismatch for {symbol}, returning all {len(klines_raw)} rows")
-                for row in klines_raw:
-                    if len(row) >= 6:
+        stock_data = self._fetch_tencent_kline_payload(tcode, "day", count)
+        if stock_data:
+            klines_raw = stock_data.get("qfqday") or stock_data.get("day") or []
+            rows = []
+            for row in klines_raw:
+                if len(row) >= 6:
+                    ds = str(row[0])[:10]
+                    if start_date <= ds <= end_date:
                         rows.append({
-                            "date": str(row[0])[:10],
+                            "date": ds,
                             "open": round(float(row[1]), 2),
                             "close": round(float(row[2]), 2),
                             "high": round(float(row[3]), 2),
                             "low": round(float(row[4]), 2),
                             "volume": int(float(row[5])),
                         })
-                return pd.DataFrame(rows)
-            except Exception as e:
-                last_error = e
-                if attempt < 2:
-                    wait = (attempt + 1) * 1.5
-                    print(f"[DataEngine] Tencent history retry {attempt+1}/3 for {symbol} in {wait}s: {e}")
-                    time.sleep(wait)
+            # Do NOT fall back to unfiltered recent bars — that silently
+            # returns data outside [start_date, end_date] and breaks backtests.
+            if rows:
+                df = pd.DataFrame(rows)
+                self._cache_set(cache_key, df.to_dict(orient="records"))
+                return df
 
-        # Fallback: try East Money
-        print(f"[DataEngine] Tencent history failed, trying East Money for {symbol}...")
+        # Fallback: East Money history hosts
         return self._fetch_em_history_raw(symbol, start_date, end_date)
 
     def _fetch_em_history_raw(self, symbol: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """East Money history fallback (with retry)."""
+        """East Money history fallback (multi-host)."""
         secid = self._to_em_secid(symbol)
-        today_str = datetime.datetime.now().strftime("%Y%m%d")
-        url = (f"https://push2his.eastmoney.com/api/qt/stock/kline/get"
-               f"?secid={secid}&fields1=f1,f2,f3"
-               f"&fields2=f51,f52,f53,f54,f55,f56,f57"
-               f"&klt=101&fqt=1&end={today_str}&lmt=1000")
+        try:
+            ed = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+            end_str = ed.strftime("%Y%m%d")
+            sd = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+            days_back = max((ed - sd).days, 1)
+            limit = min(640, max(120, int(days_back * 0.75) + 40))
+        except Exception:
+            end_str = datetime.datetime.now().strftime("%Y%m%d")
+            limit = 640
+        path = (
+            f"/api/qt/stock/kline/get"
+            f"?secid={secid}&fields1=f1,f2,f3"
+            f"&fields2=f51,f52,f53,f54,f55,f56,f57"
+            f"&klt=101&fqt=1&end={end_str}&lmt={limit}"
+        )
 
-        last_error = None
-        for attempt in range(2):
-            try:
-                self._rate_limit()
-                resp = self.http.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-                klines_raw = data.get("data", {}).get("klines", [])
-                if not klines_raw:
-                    return None
-                rows = []
-                for line in klines_raw:
-                    parts = line.split(",")
-                    if len(parts) >= 6:
-                        ds = parts[0][:10]
-                        if start_date <= ds <= end_date:
-                            rows.append({
-                                "date": ds,
-                                "open": round(float(parts[1]), 2),
-                                "close": round(float(parts[2]), 2),
-                                "high": round(float(parts[3]), 2),
-                                "low": round(float(parts[4]), 2),
-                                "volume": int(float(parts[5])),
-                            })
-                return pd.DataFrame(rows)
-            except Exception as e:
-                last_error = e
-                if attempt < 1:
-                    time.sleep(1.5)
-        print(f"[DataEngine] EM history failed for {symbol}: {last_error}")
-        return None
+        try:
+            data = self._em_his_get_json(path, retries=2)
+            klines_raw = (data.get("data") or {}).get("klines", [])
+            if not klines_raw:
+                return None
+            rows = []
+            for line in klines_raw:
+                parts = line.split(",")
+                if len(parts) >= 6:
+                    ds = parts[0][:10]
+                    if start_date <= ds <= end_date:
+                        rows.append({
+                            "date": ds,
+                            "open": round(float(parts[1]), 2),
+                            "close": round(float(parts[2]), 2),
+                            "high": round(float(parts[3]), 2),
+                            "low": round(float(parts[4]), 2),
+                            "volume": int(float(parts[5])),
+                        })
+            return pd.DataFrame(rows) if rows else None
+        except Exception as e:
+            print(f"[DataEngine] EM history failed for {symbol}: {e}")
+            return None
 
     # ── Static symbol catalog ────────────────────────────────────
 
@@ -1392,17 +2087,24 @@ class DataEngine:
         Returns list of {"code": "000001.SZ", "name": "平安银行", "type": "stock"}
         """
         all_stocks = []
+<<<<<<< HEAD
         page_size = 500  # Larger page → fewer HTTP requests
         max_pages = 15   # 500 * 15 = 7500, covers all ~5500 A-shares
+=======
+        page_size = 200
+        max_pages = 30  # 200 * 30 = 6000, covers all ~5500 A-shares
+        consecutive_failures = 0
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         for page in range(1, max_pages + 1):
-            url = (
-                f"http://80.push2.eastmoney.com/api/qt/clist/get"
+            path = (
+                f"/api/qt/clist/get"
                 f"?pn={page}&pz={page_size}&po=1&np=1&fltt=2&invt=2"
                 f"&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
                 f"&fields=f12,f14"
             )
             try:
+<<<<<<< HEAD
                 # East Money bulk loading — use faster rate limit
                 self._rate_limit(min_interval=0.1)
                 resp = self.http.get(url, headers={
@@ -1410,6 +2112,10 @@ class DataEngine:
                     "Referer": "http://quote.eastmoney.com/",
                 }, timeout=10)
                 data = resp.json()
+=======
+                data = self._em_get_json(path, retries=2)
+                consecutive_failures = 0
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                 items = data.get("data", {}).get("diff", [])
                 if not items:
                     break
@@ -1428,420 +2134,197 @@ class DataEngine:
                 if page * page_size >= total:
                     break
             except Exception as e:
+                consecutive_failures += 1
                 print(f"[DataEngine] Stock list page {page} failed: {e}")
-                break
+                if consecutive_failures >= 3 or page == 1:
+                    break
+                time.sleep(0.8 * consecutive_failures)
+                continue
 
         return all_stocks
 
-    def refresh_symbol_list(self) -> list:
-        """Force refresh the symbol list from real API."""
-        stocks = self._fetch_em_stock_list()
-        if stocks and len(stocks) > 100:
-            self._symbols = stocks
-            print(f"[DataEngine] Symbol list refreshed: {len(stocks)} stocks from East Money")
-        else:
-            print(f"[DataEngine] Stock list API returned {len(stocks)} stocks, keeping current list")
+    def _fetch_sina_stock_list(
+        self, max_pages: int = 80, stop_at: int | None = None
+    ) -> list:
+        """Fallback: Sina hs_a node pages (works when East Money clist disconnects)."""
+        all_stocks: list = []
+        seen: set[str] = set()
+        headers = {
+            **_DEFAULT_HEADERS,
+            "Referer": "https://finance.sina.com.cn/",
+        }
+        for page in range(1, max_pages + 1):
+            url = (
+                "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                "Market_Center.getHQNodeData"
+                f"?page={page}&num=80&sort=symbol&asc=1&node=hs_a&symbol=&_s_r_a=page"
+            )
+            try:
+                resp = self._http_get(url, headers=headers, retries=2)
+                rows = resp.json()
+            except Exception as e:
+                print(f"[DataEngine] Sina stock list page {page} failed: {e}")
+                if page == 1:
+                    break
+                time.sleep(0.5)
+                continue
+            if not isinstance(rows, list) or not rows:
+                break
+            for item in rows:
+                code = str(item.get("code") or "").strip()
+                name = str(item.get("name") or "").strip()
+                sym_raw = str(item.get("symbol") or "").strip().lower()
+                if not code or len(code) != 6 or not name:
+                    continue
+                if sym_raw.startswith("sh"):
+                    symbol = f"{code}.SH"
+                elif sym_raw.startswith("sz"):
+                    symbol = f"{code}.SZ"
+                elif sym_raw.startswith("bj"):
+                    symbol = f"{code}.BJ"
+                else:
+                    symbol = self._em_code_to_symbol(code)
+                if symbol in seen:
+                    continue
+                seen.add(symbol)
+                all_stocks.append({"code": symbol, "name": name, "type": "stock"})
+            if stop_at and len(all_stocks) >= stop_at:
+                break
+            time.sleep(0.12)
+        return all_stocks
+
+    def _liquid_seed_symbols(self) -> list:
+        """Real liquid codes as last-resort sample (names filled via Tencent batch)."""
+        quotes = {}
+        try:
+            quotes = self.get_realtime_quotes_batch(list(_LIQUID_SEED_CODES)) or {}
+        except Exception:
+            quotes = {}
+        out = []
+        for code in _LIQUID_SEED_CODES:
+            q = quotes.get(code) or {}
+            name = q.get("name") or code
+            out.append({"code": code, "name": name, "type": "stock"})
+        return out
+
+    def _load_symbol_disk_cache(self) -> list:
+        path = getattr(self, "_symbol_cache_path", "") or ""
+        if not path or not os.path.isfile(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            rows = payload.get("symbols") if isinstance(payload, dict) else payload
+            if not isinstance(rows, list):
+                return []
+            cleaned = []
+            for s in rows:
+                if not isinstance(s, dict):
+                    continue
+                code = s.get("code")
+                name = s.get("name")
+                if code and name:
+                    cleaned.append({"code": code, "name": name, "type": "stock"})
+            return cleaned
+        except Exception as e:
+            print(f"[DataEngine] disk symbol cache load failed: {e}")
+            return []
+
+    def _save_symbol_disk_cache(self, stocks: list) -> None:
+        path = getattr(self, "_symbol_cache_path", "") or ""
+        if not path or not stocks:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            payload = {
+                "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "count": len(stocks),
+                "symbols": stocks,
+            }
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception as e:
+            print(f"[DataEngine] disk symbol cache save failed: {e}")
+
+    def _set_symbols(self, stocks: list, source: str) -> list:
+        with self._symbols_lock:
+            self._symbols = list(stocks)
+            self._symbols_source = source
+        if source in ("eastmoney", "sina") and len(stocks) >= 100:
+            self._save_symbol_disk_cache(stocks)
         return self._symbols
 
-    def _build_symbol_list(self) -> list:
-        """Build initial symbol list — try real API, fallback to major stocks."""
+    def refresh_symbol_list(self) -> list:
+        """Force refresh the symbol list (East Money → Sina → keep cache)."""
         stocks = self._fetch_em_stock_list()
         if stocks and len(stocks) > 100:
-            print(f"[DataEngine] Loaded {len(stocks)} A-share stocks from East Money")
-            return stocks
+            print(f"[DataEngine] Symbol list refreshed: {len(stocks)} from East Money")
+            return self._set_symbols(stocks, "eastmoney")
 
-        print("[DataEngine] Stock list API unavailable, using fallback list")
-        return self._get_fallback_symbols()
+        sina = self._fetch_sina_stock_list()
+        if sina and len(sina) > 100:
+            print(f"[DataEngine] Symbol list refreshed: {len(sina)} from Sina")
+            return self._set_symbols(sina, "sina")
 
-    @staticmethod
-    def _get_fallback_symbols() -> list:
-        """Fallback: ~300 major A-share stocks by market cap."""
-        return [
-            # ── 上证主板 (600-603) ──
-            {"code": "600000.SH", "name": "浦发银行", "type": "stock"},
-            {"code": "600009.SH", "name": "上海机场", "type": "stock"},
-            {"code": "600010.SH", "name": "包钢股份", "type": "stock"},
-            {"code": "600011.SH", "name": "华能国际", "type": "stock"},
-            {"code": "600015.SH", "name": "华夏银行", "type": "stock"},
-            {"code": "600016.SH", "name": "民生银行", "type": "stock"},
-            {"code": "600018.SH", "name": "上港集团", "type": "stock"},
-            {"code": "600019.SH", "name": "宝钢股份", "type": "stock"},
-            {"code": "600025.SH", "name": "华能水电", "type": "stock"},
-            {"code": "600028.SH", "name": "中国石化", "type": "stock"},
-            {"code": "600029.SH", "name": "南方航空", "type": "stock"},
-            {"code": "600030.SH", "name": "中信证券", "type": "stock"},
-            {"code": "600031.SH", "name": "三一重工", "type": "stock"},
-            {"code": "600036.SH", "name": "招商银行", "type": "stock"},
-            {"code": "600048.SH", "name": "保利发展", "type": "stock"},
-            {"code": "600050.SH", "name": "中国联通", "type": "stock"},
-            {"code": "600056.SH", "name": "中国医药", "type": "stock"},
-            {"code": "600085.SH", "name": "同仁堂", "type": "stock"},
-            {"code": "600089.SH", "name": "特变电工", "type": "stock"},
-            {"code": "600104.SH", "name": "上汽集团", "type": "stock"},
-            {"code": "600111.SH", "name": "北方稀土", "type": "stock"},
-            {"code": "600115.SH", "name": "中国东航", "type": "stock"},
-            {"code": "600150.SH", "name": "中国船舶", "type": "stock"},
-            {"code": "600176.SH", "name": "中国巨石", "type": "stock"},
-            {"code": "600183.SH", "name": "生益科技", "type": "stock"},
-            {"code": "600188.SH", "name": "兖矿能源", "type": "stock"},
-            {"code": "600196.SH", "name": "复星医药", "type": "stock"},
-            {"code": "600219.SH", "name": "南山铝业", "type": "stock"},
-            {"code": "600233.SH", "name": "圆通速递", "type": "stock"},
-            {"code": "600276.SH", "name": "恒瑞医药", "type": "stock"},
-            {"code": "600309.SH", "name": "万华化学", "type": "stock"},
-            {"code": "600332.SH", "name": "白云山", "type": "stock"},
-            {"code": "600346.SH", "name": "恒力石化", "type": "stock"},
-            {"code": "600362.SH", "name": "江西铜业", "type": "stock"},
-            {"code": "600406.SH", "name": "国电南瑞", "type": "stock"},
-            {"code": "600415.SH", "name": "小商品城", "type": "stock"},
-            {"code": "600426.SH", "name": "华鲁恒升", "type": "stock"},
-            {"code": "600436.SH", "name": "片仔癀", "type": "stock"},
-            {"code": "600438.SH", "name": "通威股份", "type": "stock"},
-            {"code": "600460.SH", "name": "士兰微", "type": "stock"},
-            {"code": "600489.SH", "name": "中金黄金", "type": "stock"},
-            {"code": "600519.SH", "name": "贵州茅台", "type": "stock"},
-            {"code": "600522.SH", "name": "中天科技", "type": "stock"},
-            {"code": "600547.SH", "name": "山东黄金", "type": "stock"},
-            {"code": "600570.SH", "name": "恒生电子", "type": "stock"},
-            {"code": "600584.SH", "name": "长电科技", "type": "stock"},
-            {"code": "600585.SH", "name": "海螺水泥", "type": "stock"},
-            {"code": "600588.SH", "name": "用友网络", "type": "stock"},
-            {"code": "600600.SH", "name": "青岛啤酒", "type": "stock"},
-            {"code": "600660.SH", "name": "福耀玻璃", "type": "stock"},
-            {"code": "600690.SH", "name": "海尔智家", "type": "stock"},
-            {"code": "600703.SH", "name": "三安光电", "type": "stock"},
-            {"code": "600732.SH", "name": "爱旭股份", "type": "stock"},
-            {"code": "600741.SH", "name": "华域汽车", "type": "stock"},
-            {"code": "600745.SH", "name": "闻泰科技", "type": "stock"},
-            {"code": "600760.SH", "name": "中航沈飞", "type": "stock"},
-            {"code": "600795.SH", "name": "国电电力", "type": "stock"},
-            {"code": "600809.SH", "name": "山西汾酒", "type": "stock"},
-            {"code": "600837.SH", "name": "海通证券", "type": "stock"},
-            {"code": "600845.SH", "name": "宝信软件", "type": "stock"},
-            {"code": "600886.SH", "name": "国投电力", "type": "stock"},
-            {"code": "600887.SH", "name": "伊利股份", "type": "stock"},
-            {"code": "600893.SH", "name": "航发动力", "type": "stock"},
-            {"code": "600900.SH", "name": "长江电力", "type": "stock"},
-            {"code": "600905.SH", "name": "三峡能源", "type": "stock"},
-            {"code": "600918.SH", "name": "中泰证券", "type": "stock"},
-            {"code": "600919.SH", "name": "江苏银行", "type": "stock"},
-            {"code": "600926.SH", "name": "杭州银行", "type": "stock"},
-            {"code": "600941.SH", "name": "中国移动", "type": "stock"},
-            {"code": "600958.SH", "name": "东方证券", "type": "stock"},
-            {"code": "600999.SH", "name": "招商证券", "type": "stock"},
-            {"code": "601006.SH", "name": "大秦铁路", "type": "stock"},
-            {"code": "601009.SH", "name": "南京银行", "type": "stock"},
-            {"code": "601012.SH", "name": "隆基绿能", "type": "stock"},
-            {"code": "601021.SH", "name": "春秋航空", "type": "stock"},
-            {"code": "601058.SH", "name": "赛轮轮胎", "type": "stock"},
-            {"code": "601066.SH", "name": "中信建投", "type": "stock"},
-            {"code": "601088.SH", "name": "中国神华", "type": "stock"},
-            {"code": "601100.SH", "name": "恒立液压", "type": "stock"},
-            {"code": "601108.SH", "name": "财通证券", "type": "stock"},
-            {"code": "601111.SH", "name": "中国国航", "type": "stock"},
-            {"code": "601117.SH", "name": "中国化学", "type": "stock"},
-            {"code": "601127.SH", "name": "赛力斯", "type": "stock"},
-            {"code": "601138.SH", "name": "工业富联", "type": "stock"},
-            {"code": "601166.SH", "name": "兴业银行", "type": "stock"},
-            {"code": "601169.SH", "name": "北京银行", "type": "stock"},
-            {"code": "601186.SH", "name": "中国铁建", "type": "stock"},
-            {"code": "601211.SH", "name": "国泰君安", "type": "stock"},
-            {"code": "601212.SH", "name": "白银有色", "type": "stock"},
-            {"code": "601216.SH", "name": "君正集团", "type": "stock"},
-            {"code": "601225.SH", "name": "陕西煤业", "type": "stock"},
-            {"code": "601229.SH", "name": "上海银行", "type": "stock"},
-            {"code": "601236.SH", "name": "红塔证券", "type": "stock"},
-            {"code": "601238.SH", "name": "广汽集团", "type": "stock"},
-            {"code": "601288.SH", "name": "农业银行", "type": "stock"},
-            {"code": "601318.SH", "name": "中国平安", "type": "stock"},
-            {"code": "601319.SH", "name": "中国人保", "type": "stock"},
-            {"code": "601328.SH", "name": "交通银行", "type": "stock"},
-            {"code": "601336.SH", "name": "新华保险", "type": "stock"},
-            {"code": "601360.SH", "name": "三六零", "type": "stock"},
-            {"code": "601390.SH", "name": "中国中铁", "type": "stock"},
-            {"code": "601398.SH", "name": "工商银行", "type": "stock"},
-            {"code": "601456.SH", "name": "国联证券", "type": "stock"},
-            {"code": "601600.SH", "name": "中国铝业", "type": "stock"},
-            {"code": "601601.SH", "name": "中国太保", "type": "stock"},
-            {"code": "601607.SH", "name": "上海医药", "type": "stock"},
-            {"code": "601615.SH", "name": "明阳智能", "type": "stock"},
-            {"code": "601618.SH", "name": "中国中冶", "type": "stock"},
-            {"code": "601628.SH", "name": "中国人寿", "type": "stock"},
-            {"code": "601633.SH", "name": "长城汽车", "type": "stock"},
-            {"code": "601658.SH", "name": "邮储银行", "type": "stock"},
-            {"code": "601668.SH", "name": "中国建筑", "type": "stock"},
-            {"code": "601669.SH", "name": "中国电建", "type": "stock"},
-            {"code": "601688.SH", "name": "华泰证券", "type": "stock"},
-            {"code": "601689.SH", "name": "拓普集团", "type": "stock"},
-            {"code": "601698.SH", "name": "中国卫通", "type": "stock"},
-            {"code": "601700.SH", "name": "风范股份", "type": "stock"},
-            {"code": "601727.SH", "name": "上海电气", "type": "stock"},
-            {"code": "601728.SH", "name": "中国电信", "type": "stock"},
-            {"code": "601766.SH", "name": "中国中车", "type": "stock"},
-            {"code": "601788.SH", "name": "光大证券", "type": "stock"},
-            {"code": "601800.SH", "name": "中国交建", "type": "stock"},
-            {"code": "601816.SH", "name": "京沪高铁", "type": "stock"},
-            {"code": "601818.SH", "name": "光大银行", "type": "stock"},
-            {"code": "601838.SH", "name": "成都银行", "type": "stock"},
-            {"code": "601857.SH", "name": "中国石油", "type": "stock"},
-            {"code": "601868.SH", "name": "中国能建", "type": "stock"},
-            {"code": "601872.SH", "name": "招商轮船", "type": "stock"},
-            {"code": "601877.SH", "name": "正泰电器", "type": "stock"},
-            {"code": "601878.SH", "name": "浙商证券", "type": "stock"},
-            {"code": "601881.SH", "name": "中国银河", "type": "stock"},
-            {"code": "601888.SH", "name": "中国中免", "type": "stock"},
-            {"code": "601899.SH", "name": "紫金矿业", "type": "stock"},
-            {"code": "601919.SH", "name": "中远海控", "type": "stock"},
-            {"code": "601933.SH", "name": "永辉超市", "type": "stock"},
-            {"code": "601939.SH", "name": "建设银行", "type": "stock"},
-            {"code": "601985.SH", "name": "中国核电", "type": "stock"},
-            {"code": "601988.SH", "name": "中国银行", "type": "stock"},
-            {"code": "601989.SH", "name": "中国重工", "type": "stock"},
-            {"code": "601995.SH", "name": "中金公司", "type": "stock"},
-            {"code": "601998.SH", "name": "中信银行", "type": "stock"},
-            {"code": "603019.SH", "name": "中科曙光", "type": "stock"},
-            {"code": "603087.SH", "name": "甘李药业", "type": "stock"},
-            {"code": "603160.SH", "name": "汇顶科技", "type": "stock"},
-            {"code": "603185.SH", "name": "弘元绿能", "type": "stock"},
-            {"code": "603195.SH", "name": "公牛集团", "type": "stock"},
-            {"code": "603259.SH", "name": "药明康德", "type": "stock"},
-            {"code": "603260.SH", "name": "合盛硅业", "type": "stock"},
-            {"code": "603288.SH", "name": "海天味业", "type": "stock"},
-            {"code": "603290.SH", "name": "斯达半导", "type": "stock"},
-            {"code": "603296.SH", "name": "华勤技术", "type": "stock"},
-            {"code": "603369.SH", "name": "今世缘", "type": "stock"},
-            {"code": "603392.SH", "name": "万泰生物", "type": "stock"},
-            {"code": "603444.SH", "name": "吉比特", "type": "stock"},
-            {"code": "603486.SH", "name": "科沃斯", "type": "stock"},
-            {"code": "603501.SH", "name": "韦尔股份", "type": "stock"},
-            {"code": "603589.SH", "name": "口子窖", "type": "stock"},
-            {"code": "603596.SH", "name": "伯特利", "type": "stock"},
-            {"code": "603658.SH", "name": "安图生物", "type": "stock"},
-            {"code": "603659.SH", "name": "璞泰来", "type": "stock"},
-            {"code": "603707.SH", "name": "健友股份", "type": "stock"},
-            {"code": "603799.SH", "name": "华友钴业", "type": "stock"},
-            {"code": "603806.SH", "name": "福斯特", "type": "stock"},
-            {"code": "603833.SH", "name": "欧派家居", "type": "stock"},
-            {"code": "603882.SH", "name": "金域医学", "type": "stock"},
-            {"code": "603899.SH", "name": "晨光股份", "type": "stock"},
-            {"code": "603939.SH", "name": "益丰药房", "type": "stock"},
-            {"code": "603986.SH", "name": "兆易创新", "type": "stock"},
-            {"code": "603993.SH", "name": "洛阳钼业", "type": "stock"},
-            # ── 科创板 (688) ──
-            {"code": "688005.SH", "name": "容百科技", "type": "stock"},
-            {"code": "688008.SH", "name": "澜起科技", "type": "stock"},
-            {"code": "688009.SH", "name": "中国通号", "type": "stock"},
-            {"code": "688012.SH", "name": "中微公司", "type": "stock"},
-            {"code": "688036.SH", "name": "传音控股", "type": "stock"},
-            {"code": "688041.SH", "name": "海光信息", "type": "stock"},
-            {"code": "688047.SH", "name": "龙芯中科", "type": "stock"},
-            {"code": "688052.SH", "name": "纳芯微", "type": "stock"},
-            {"code": "688065.SH", "name": "凯赛生物", "type": "stock"},
-            {"code": "688072.SH", "name": "拓荆科技", "type": "stock"},
-            {"code": "688082.SH", "name": "盛美上海", "type": "stock"},
-            {"code": "688099.SH", "name": "晶晨股份", "type": "stock"},
-            {"code": "688111.SH", "name": "金山办公", "type": "stock"},
-            {"code": "688126.SH", "name": "沪硅产业", "type": "stock"},
-            {"code": "688153.SH", "name": "唯捷创芯", "type": "stock"},
-            {"code": "688169.SH", "name": "石头科技", "type": "stock"},
-            {"code": "688180.SH", "name": "君实生物", "type": "stock"},
-            {"code": "688185.SH", "name": "康希诺", "type": "stock"},
-            {"code": "688187.SH", "name": "时代电气", "type": "stock"},
-            {"code": "688188.SH", "name": "柏楚电子", "type": "stock"},
-            {"code": "688220.SH", "name": "翱捷科技", "type": "stock"},
-            {"code": "688223.SH", "name": "晶科能源", "type": "stock"},
-            {"code": "688234.SH", "name": "天岳先进", "type": "stock"},
-            {"code": "688235.SH", "name": "百济神州", "type": "stock"},
-            {"code": "688256.SH", "name": "寒武纪", "type": "stock"},
-            {"code": "688271.SH", "name": "联影医疗", "type": "stock"},
-            {"code": "688303.SH", "name": "大全能源", "type": "stock"},
-            {"code": "688347.SH", "name": "华虹公司", "type": "stock"},
-            {"code": "688348.SH", "name": "昱能科技", "type": "stock"},
-            {"code": "688349.SH", "name": "三一重能", "type": "stock"},
-            {"code": "688363.SH", "name": "华熙生物", "type": "stock"},
-            {"code": "688385.SH", "name": "复旦微电", "type": "stock"},
-            {"code": "688390.SH", "name": "固德威", "type": "stock"},
-            {"code": "688396.SH", "name": "华润微", "type": "stock"},
-            {"code": "688472.SH", "name": "阿特斯", "type": "stock"},
-            {"code": "688484.SH", "name": "南芯科技", "type": "stock"},
-            {"code": "688498.SH", "name": "源杰科技", "type": "stock"},
-            {"code": "688506.SH", "name": "百利天恒", "type": "stock"},
-            {"code": "688516.SH", "name": "奥特维", "type": "stock"},
-            {"code": "688521.SH", "name": "芯原股份", "type": "stock"},
-            {"code": "688525.SH", "name": "佰维存储", "type": "stock"},
-            {"code": "688536.SH", "name": "思瑞浦", "type": "stock"},
-            {"code": "688556.SH", "name": "高测股份", "type": "stock"},
-            {"code": "688561.SH", "name": "奇安信", "type": "stock"},
-            {"code": "688567.SH", "name": "孚能科技", "type": "stock"},
-            {"code": "688568.SH", "name": "中科星图", "type": "stock"},
-            {"code": "688599.SH", "name": "天合光能", "type": "stock"},
-            {"code": "688608.SH", "name": "恒玄科技", "type": "stock"},
-            {"code": "688630.SH", "name": "芯碁微装", "type": "stock"},
-            {"code": "688661.SH", "name": "和林微纳", "type": "stock"},
-            {"code": "688676.SH", "name": "金盘科技", "type": "stock"},
-            {"code": "688728.SH", "name": "格科微", "type": "stock"},
-            {"code": "688772.SH", "name": "珠海冠宇", "type": "stock"},
-            {"code": "688777.SH", "name": "中控技术", "type": "stock"},
-            {"code": "688778.SH", "name": "厦钨新能", "type": "stock"},
-            {"code": "688819.SH", "name": "天能股份", "type": "stock"},
-            {"code": "688981.SH", "name": "中芯国际", "type": "stock"},
-            # ── 深证主板 (000-002) ──
-            {"code": "000001.SZ", "name": "平安银行", "type": "stock"},
-            {"code": "000002.SZ", "name": "万科A", "type": "stock"},
-            {"code": "000021.SZ", "name": "深科技", "type": "stock"},
-            {"code": "000063.SZ", "name": "中兴通讯", "type": "stock"},
-            {"code": "000066.SZ", "name": "中国长城", "type": "stock"},
-            {"code": "000100.SZ", "name": "TCL科技", "type": "stock"},
-            {"code": "000157.SZ", "name": "中联重科", "type": "stock"},
-            {"code": "000166.SZ", "name": "申万宏源", "type": "stock"},
-            {"code": "000301.SZ", "name": "东方盛虹", "type": "stock"},
-            {"code": "000333.SZ", "name": "美的集团", "type": "stock"},
-            {"code": "000338.SZ", "name": "潍柴动力", "type": "stock"},
-            {"code": "000408.SZ", "name": "藏格矿业", "type": "stock"},
-            {"code": "000425.SZ", "name": "徐工机械", "type": "stock"},
-            {"code": "000513.SZ", "name": "丽珠集团", "type": "stock"},
-            {"code": "000538.SZ", "name": "云南白药", "type": "stock"},
-            {"code": "000568.SZ", "name": "泸州老窖", "type": "stock"},
-            {"code": "000596.SZ", "name": "古井贡酒", "type": "stock"},
-            {"code": "000617.SZ", "name": "中油资本", "type": "stock"},
-            {"code": "000625.SZ", "name": "长安汽车", "type": "stock"},
-            {"code": "000630.SZ", "name": "铜陵有色", "type": "stock"},
-            {"code": "000651.SZ", "name": "格力电器", "type": "stock"},
-            {"code": "000661.SZ", "name": "长春高新", "type": "stock"},
-            {"code": "000708.SZ", "name": "中信特钢", "type": "stock"},
-            {"code": "000723.SZ", "name": "美锦能源", "type": "stock"},
-            {"code": "000725.SZ", "name": "京东方A", "type": "stock"},
-            {"code": "000733.SZ", "name": "振华科技", "type": "stock"},
-            {"code": "000768.SZ", "name": "中航西飞", "type": "stock"},
-            {"code": "000776.SZ", "name": "广发证券", "type": "stock"},
-            {"code": "000786.SZ", "name": "北新建材", "type": "stock"},
-            {"code": "000792.SZ", "name": "盐湖股份", "type": "stock"},
-            {"code": "000799.SZ", "name": "酒鬼酒", "type": "stock"},
-            {"code": "000800.SZ", "name": "一汽解放", "type": "stock"},
-            {"code": "000807.SZ", "name": "云铝股份", "type": "stock"},
-            {"code": "000831.SZ", "name": "中国稀土", "type": "stock"},
-            {"code": "000858.SZ", "name": "五粮液", "type": "stock"},
-            {"code": "000876.SZ", "name": "新希望", "type": "stock"},
-            {"code": "000895.SZ", "name": "双汇发展", "type": "stock"},
-            {"code": "000938.SZ", "name": "紫光股份", "type": "stock"},
-            {"code": "000963.SZ", "name": "华东医药", "type": "stock"},
-            {"code": "000975.SZ", "name": "银泰黄金", "type": "stock"},
-            {"code": "000977.SZ", "name": "浪潮信息", "type": "stock"},
-            {"code": "000983.SZ", "name": "山西焦煤", "type": "stock"},
-            {"code": "001308.SZ", "name": "康冠科技", "type": "stock"},
-            {"code": "001979.SZ", "name": "招商蛇口", "type": "stock"},
-            {"code": "002001.SZ", "name": "新和成", "type": "stock"},
-            {"code": "002007.SZ", "name": "华兰生物", "type": "stock"},
-            {"code": "002027.SZ", "name": "分众传媒", "type": "stock"},
-            {"code": "002049.SZ", "name": "紫光国微", "type": "stock"},
-            {"code": "002050.SZ", "name": "三花智控", "type": "stock"},
-            {"code": "002074.SZ", "name": "国轩高科", "type": "stock"},
-            {"code": "002120.SZ", "name": "韵达股份", "type": "stock"},
-            {"code": "002129.SZ", "name": "TCL中环", "type": "stock"},
-            {"code": "002142.SZ", "name": "宁波银行", "type": "stock"},
-            {"code": "002179.SZ", "name": "中航光电", "type": "stock"},
-            {"code": "002180.SZ", "name": "纳思达", "type": "stock"},
-            {"code": "002202.SZ", "name": "金风科技", "type": "stock"},
-            {"code": "002230.SZ", "name": "科大讯飞", "type": "stock"},
-            {"code": "002236.SZ", "name": "大华股份", "type": "stock"},
-            {"code": "002241.SZ", "name": "歌尔股份", "type": "stock"},
-            {"code": "002252.SZ", "name": "上海莱士", "type": "stock"},
-            {"code": "002271.SZ", "name": "东方雨虹", "type": "stock"},
-            {"code": "002281.SZ", "name": "光迅科技", "type": "stock"},
-            {"code": "002304.SZ", "name": "洋河股份", "type": "stock"},
-            {"code": "002311.SZ", "name": "海大集团", "type": "stock"},
-            {"code": "002340.SZ", "name": "格林美", "type": "stock"},
-            {"code": "002352.SZ", "name": "顺丰控股", "type": "stock"},
-            {"code": "002371.SZ", "name": "北方华创", "type": "stock"},
-            {"code": "002384.SZ", "name": "东山精密", "type": "stock"},
-            {"code": "002410.SZ", "name": "广联达", "type": "stock"},
-            {"code": "002414.SZ", "name": "高德红外", "type": "stock"},
-            {"code": "002415.SZ", "name": "海康威视", "type": "stock"},
-            {"code": "002459.SZ", "name": "晶澳科技", "type": "stock"},
-            {"code": "002460.SZ", "name": "赣锋锂业", "type": "stock"},
-            {"code": "002466.SZ", "name": "天齐锂业", "type": "stock"},
-            {"code": "002475.SZ", "name": "立讯精密", "type": "stock"},
-            {"code": "002493.SZ", "name": "荣盛石化", "type": "stock"},
-            {"code": "002555.SZ", "name": "三七互娱", "type": "stock"},
-            {"code": "002594.SZ", "name": "比亚迪", "type": "stock"},
-            {"code": "002600.SZ", "name": "领益智造", "type": "stock"},
-            {"code": "002601.SZ", "name": "龙佰集团", "type": "stock"},
-            {"code": "002603.SZ", "name": "以岭药业", "type": "stock"},
-            {"code": "002648.SZ", "name": "卫星化学", "type": "stock"},
-            {"code": "002709.SZ", "name": "天赐材料", "type": "stock"},
-            {"code": "002714.SZ", "name": "牧原股份", "type": "stock"},
-            {"code": "002736.SZ", "name": "国信证券", "type": "stock"},
-            {"code": "002812.SZ", "name": "恩捷股份", "type": "stock"},
-            {"code": "002920.SZ", "name": "德赛西威", "type": "stock"},
-            {"code": "002938.SZ", "name": "鹏鼎控股", "type": "stock"},
-            {"code": "003816.SZ", "name": "中国广核", "type": "stock"},
-            # ── 创业板 (300-301) ──
-            {"code": "300001.SZ", "name": "特锐德", "type": "stock"},
-            {"code": "300003.SZ", "name": "乐普医疗", "type": "stock"},
-            {"code": "300012.SZ", "name": "华测检测", "type": "stock"},
-            {"code": "300014.SZ", "name": "亿纬锂能", "type": "stock"},
-            {"code": "300015.SZ", "name": "爱尔眼科", "type": "stock"},
-            {"code": "300017.SZ", "name": "网宿科技", "type": "stock"},
-            {"code": "300033.SZ", "name": "同花顺", "type": "stock"},
-            {"code": "300037.SZ", "name": "新宙邦", "type": "stock"},
-            {"code": "300058.SZ", "name": "蓝色光标", "type": "stock"},
-            {"code": "300059.SZ", "name": "东方财富", "type": "stock"},
-            {"code": "300073.SZ", "name": "当升科技", "type": "stock"},
-            {"code": "300115.SZ", "name": "长盈精密", "type": "stock"},
-            {"code": "300118.SZ", "name": "东方日升", "type": "stock"},
-            {"code": "300122.SZ", "name": "智飞生物", "type": "stock"},
-            {"code": "300124.SZ", "name": "汇川技术", "type": "stock"},
-            {"code": "300136.SZ", "name": "信维通信", "type": "stock"},
-            {"code": "300142.SZ", "name": "沃森生物", "type": "stock"},
-            {"code": "300207.SZ", "name": "欣旺达", "type": "stock"},
-            {"code": "300223.SZ", "name": "北京君正", "type": "stock"},
-            {"code": "300251.SZ", "name": "光线传媒", "type": "stock"},
-            {"code": "300274.SZ", "name": "阳光电源", "type": "stock"},
-            {"code": "300285.SZ", "name": "国瓷材料", "type": "stock"},
-            {"code": "300316.SZ", "name": "晶盛机电", "type": "stock"},
-            {"code": "300347.SZ", "name": "泰格医药", "type": "stock"},
-            {"code": "300390.SZ", "name": "天华新能", "type": "stock"},
-            {"code": "300394.SZ", "name": "天孚通信", "type": "stock"},
-            {"code": "300408.SZ", "name": "三环集团", "type": "stock"},
-            {"code": "300413.SZ", "name": "芒果超媒", "type": "stock"},
-            {"code": "300418.SZ", "name": "昆仑万维", "type": "stock"},
-            {"code": "300433.SZ", "name": "蓝思科技", "type": "stock"},
-            {"code": "300442.SZ", "name": "润泽科技", "type": "stock"},
-            {"code": "300450.SZ", "name": "先导智能", "type": "stock"},
-            {"code": "300454.SZ", "name": "深信服", "type": "stock"},
-            {"code": "300474.SZ", "name": "景嘉微", "type": "stock"},
-            {"code": "300496.SZ", "name": "中科创达", "type": "stock"},
-            {"code": "300498.SZ", "name": "温氏股份", "type": "stock"},
-            {"code": "300502.SZ", "name": "新易盛", "type": "stock"},
-            {"code": "300529.SZ", "name": "健帆生物", "type": "stock"},
-            {"code": "300552.SZ", "name": "万集科技", "type": "stock"},
-            {"code": "300558.SZ", "name": "贝达药业", "type": "stock"},
-            {"code": "300567.SZ", "name": "精测电子", "type": "stock"},
-            {"code": "300595.SZ", "name": "欧普康视", "type": "stock"},
-            {"code": "300601.SZ", "name": "康泰生物", "type": "stock"},
-            {"code": "300604.SZ", "name": "长川科技", "type": "stock"},
-            {"code": "300628.SZ", "name": "亿联网络", "type": "stock"},
-            {"code": "300661.SZ", "name": "圣邦股份", "type": "stock"},
-            {"code": "300677.SZ", "name": "英科医疗", "type": "stock"},
-            {"code": "300682.SZ", "name": "朗新科技", "type": "stock"},
-            {"code": "300699.SZ", "name": "光威复材", "type": "stock"},
-            {"code": "300724.SZ", "name": "捷佳伟创", "type": "stock"},
-            {"code": "300750.SZ", "name": "宁德时代", "type": "stock"},
-            {"code": "300751.SZ", "name": "迈为股份", "type": "stock"},
-            {"code": "300760.SZ", "name": "迈瑞医疗", "type": "stock"},
-            {"code": "300763.SZ", "name": "锦浪科技", "type": "stock"},
-            {"code": "300782.SZ", "name": "卓胜微", "type": "stock"},
-            {"code": "300832.SZ", "name": "新产业", "type": "stock"},
-            {"code": "300850.SZ", "name": "新强联", "type": "stock"},
-            {"code": "300896.SZ", "name": "爱美客", "type": "stock"},
-            {"code": "300919.SZ", "name": "中伟股份", "type": "stock"},
-            {"code": "300957.SZ", "name": "贝泰妮", "type": "stock"},
-            {"code": "300979.SZ", "name": "华利集团", "type": "stock"},
-            {"code": "300999.SZ", "name": "金龙鱼", "type": "stock"},
-            {"code": "301004.SZ", "name": "嘉益股份", "type": "stock"},
-            {"code": "301050.SZ", "name": "雷电微力", "type": "stock"},
-            {"code": "301269.SZ", "name": "华大九天", "type": "stock"},
-        ]
+        if self._symbols and len(self._symbols) >= 40:
+            print(
+                f"[DataEngine] Upstream list failed; keeping {len(self._symbols)} "
+                f"cached symbols ({self._symbols_source})"
+            )
+            return self._symbols
+
+        raise RuntimeError(
+            f"股票列表刷新失败（东财 {len(stocks)} / 新浪 {len(sina)}），"
+            "且无可用本地缓存"
+        )
+
+    def ensure_symbol_list(self, *, min_count: int = 100) -> list:
+        """Ensure an A-share list is available (live or disk cache).
+
+        Prefer East Money; fall back to Sina, then disk cache, then liquid seed.
+        """
+        if self._symbols and len(self._symbols) >= min_count:
+            return self._symbols
+
+        # Fresh fetch
+        try:
+            stocks = self._fetch_em_stock_list()
+            if stocks and len(stocks) >= min_count:
+                print(f"[DataEngine] Loaded {len(stocks)} A-share stocks from East Money")
+                return self._set_symbols(stocks, "eastmoney")
+        except Exception as e:
+            print(f"[DataEngine] East Money stock list error: {e}")
+
+        try:
+            # Fast path: enough pages for search/avg-price; full refresh in background later
+            sina = self._fetch_sina_stock_list(max_pages=20, stop_at=max(min_count, 800))
+            if sina and len(sina) >= min_count:
+                print(f"[DataEngine] Loaded {len(sina)} A-share stocks from Sina")
+                result = self._set_symbols(sina, "sina")
+                # Complete full list asynchronously when we only got a partial page set
+                if len(sina) < 3000:
+                    threading.Thread(
+                        target=self._async_full_sina_refresh,
+                        name="sina-full-list",
+                        daemon=True,
+                    ).start()
+                return result
+        except Exception as e:
+            print(f"[DataEngine] Sina stock list error: {e}")
+
+        disk = self._load_symbol_disk_cache()
+        if disk and len(disk) >= min(min_count, 40):
+            print(f"[DataEngine] Using disk cache: {len(disk)} symbols")
+            return self._set_symbols(disk, "disk_cache")
+
+        if self._symbols and len(self._symbols) >= 20:
+            return self._symbols
+
+        seed = self._liquid_seed_symbols()
+        print(f"[DataEngine] Using liquid seed sample: {len(seed)} symbols")
+        return self._set_symbols(seed, "liquid_seed")
 
 
     # ═══════════════════════════════════════════════════════════════
@@ -1849,86 +2332,409 @@ class DataEngine:
     # ═══════════════════════════════════════════════════════════════
 
     def get_avg_price_kline(self, count: int = 120) -> dict:
-        """Get K-line data for the average stock price indicator.
+        """Real average-price K-line for market environment analysis.
 
-        Builds a composite average price series by sampling a representative
-        basket of A-shares and computing the cross-sectional average close/volume
-        for each trading day, approximating the 通达信平均股价 (880003) index.
-
-        Returns:
-          {"data": [{"date", "open", "close", "high", "low", "volume"}, ...]}
+        Prefer configured AVG_PRICE_SYMBOL (e.g. 通达信 880003) if the API returns it.
+        Otherwise build a true cross-sectional average from a basket of real stock K-lines.
+        Never scales an index with a fake default price.
         """
         cache_key = f"avg_price_kline_{count}"
         cached = self._cache_get(cache_key, "kline")
+        if cached and isinstance(cached, dict) and cached.get("data"):
+            return cached
+
+        # 1) Try configured average-price index only when it is a real exchange code.
+        # 通达信 880003 不是腾讯/东财个股代码，直接请求会报 param error。
+        avg_sym = (settings.AVG_PRICE_SYMBOL or "").strip().upper()
+        if "." in avg_sym and avg_sym.split(".", 1)[1] in ("SH", "SZ", "BJ"):
+            try:
+                kl = self._fetch_em_kline(avg_sym, "1d", count)
+                if kl and len(kl) >= 20:
+                    payload = {
+                        "data": kl,
+                        "data_source": "realtime",
+                        "symbol": avg_sym,
+                    }
+                    self._cache_set(cache_key, payload)
+                    return payload
+            except Exception as e:
+                print(f"[DataEngine] AVG_PRICE_SYMBOL {avg_sym} unavailable: {e}")
+        elif avg_sym and not getattr(self, "_avg_price_skip_logged", False):
+            print(
+                f"[DataEngine] {avg_sym} 不是交易所代码，跳过行情接口，"
+                "改用真实个股截面均价"
+            )
+            self._avg_price_skip_logged = True
+
+        # 2) Cross-sectional mean of real stock OHLC (no index scaling)
+        payload = self._build_cross_section_avg_kline(count)
+        self._cache_set(cache_key, payload)
+        return payload
+
+    def _build_cross_section_avg_kline(self, count: int) -> dict:
+        """Average OHLC across a board-balanced sample of real A-share K-lines."""
+        sample: list[str] = []
+        try:
+            self.ensure_symbol_list(min_count=40)
+            boards = {"main": [], "star": [], "chinext": [], "bse": []}
+            for s in self._symbols:
+                b = self._market_board(s["code"])
+                if b in boards and len(boards[b]) < 12:
+                    boards[b].append(s["code"])
+            sample = boards["main"] + boards["star"] + boards["chinext"] + boards["bse"]
+            if len(sample) < 20:
+                sample = [s["code"] for s in self._symbols[:48]]
+        except Exception as e:
+            print(f"[DataEngine] symbol list for avg-price unavailable: {e}")
+
+        if len(sample) < 10:
+            sample = list(_LIQUID_SEED_CODES)
+            print(f"[DataEngine] avg-price using liquid seed ({len(sample)} codes)")
+
+        # date -> accumulators
+        acc: dict[str, dict] = {}
+        used = 0
+        for code in sample[:48]:
+            try:
+                kl = self._fetch_em_kline(code, "1d", count)
+            except Exception:
+                kl = None
+            if not kl:
+                continue
+            used += 1
+            for bar in kl:
+                d = bar.get("date")
+                if not d:
+                    continue
+                bucket = acc.setdefault(
+                    d,
+                    {"open": 0.0, "close": 0.0, "high": 0.0, "low": 0.0, "volume": 0.0, "n": 0},
+                )
+                bucket["open"] += float(bar["open"])
+                bucket["close"] += float(bar["close"])
+                bucket["high"] += float(bar["high"])
+                bucket["low"] += float(bar["low"])
+                bucket["volume"] += float(bar.get("volume") or 0)
+                bucket["n"] += 1
+            time.sleep(0.15)
+
+        if used < 8:
+            raise RuntimeError(f"真实K线样本过少（{used}），拒绝生成平均股价序列")
+
+        result = []
+        for d in sorted(acc.keys()):
+            b = acc[d]
+            n = b["n"]
+            if n < max(5, used // 4):
+                continue
+            result.append({
+                "date": d,
+                "open": round(b["open"] / n, 2),
+                "close": round(b["close"] / n, 2),
+                "high": round(b["high"] / n, 2),
+                "low": round(b["low"] / n, 2),
+                "volume": int(b["volume"] / n),
+                "n": n,
+            })
+
+        if len(result) < 20:
+            raise RuntimeError("截面平均股价交易日不足")
+
+        # Drop incomplete tip bar: thin sample or absurd day move
+        if len(result) >= 2:
+            tip = result[-1]
+            prev = result[-2]
+            tip_n = int(tip.get("n") or 0)
+            med_n = sorted(int(r.get("n") or 0) for r in result[:-1])[len(result) // 2]
+            day_move = (
+                tip["close"] / prev["close"] - 1.0
+                if prev.get("close")
+                else 0.0
+            )
+            if tip_n < max(5, int(med_n * 0.6)) or abs(day_move) > 0.05:
+                result = result[:-1]
+
+        # Strip helper field before return
+        for r in result:
+            r.pop("n", None)
+
+        return {
+            "data": result[-count:],
+            "data_source": "realtime_cross_section",
+            "sample_size": used,
+        }
+
+    # ── Stock insight (company + market + news) ─────────────────
+
+    @staticmethod
+    def _to_em_f10_code(symbol: str) -> str:
+        """600519.SH → SH600519 | 000001.SZ → SZ000001"""
+        parts = (symbol or "").upper().split(".")
+        if len(parts) != 2:
+            return (symbol or "").upper()
+        return f"{parts[1]}{parts[0]}"
+
+    def get_stock_insight(self, symbol: str) -> dict:
+        """Aggregate company profile, enriched quote, and related news."""
+        symbol = self.normalize_symbol(symbol)
+        if not symbol:
+            raise ValueError("股票代码无效")
+
+        cache_key = f"insight_{symbol}"
+        cached = self._cache_get(cache_key, "insight")
         if cached:
             return cached
 
-        # Build a representative sample of stocks across boards
-        sample_symbols = []
-        boards = {"main": [], "star": [], "chinext": [], "bse": []}
-        for s in self._symbols[:500]:
-            b = self._market_board(s["code"])
-            if b in boards and len(boards[b]) < 15:
-                boards[b].append(s)
-        for b in ["main", "star", "chinext", "bse"]:
-            sample_symbols.extend([s["code"] for s in boards[b]])
-        if len(sample_symbols) < 20:
-            sample_symbols = [s["code"] for s in self._symbols[:60]]
-
-        # Use a market index K-line for date scaffolding (上证指数 as market proxy)
+        quote = {}
         try:
-            base_kline = self.get_kline_data("000001.SH", "1d", count)
-            if not base_kline:
-                return self._fallback_avg_price_kline(count, cache_key)
-
-            dates = [k["date"] for k in base_kline]
-
-            # For each date, compute the cross-sectional average close across the sample
-            # We use the base index's returns to approximate the average price movement,
-            # scaled to the current average price level
-            avg_price_info = self._calculate_avg_stock_price()
-            avg_price_now = avg_price_info["price"] if avg_price_info else 15.0
-
-            # Use the base symbol's close as a proxy for the index shape,
-            # then scale to average price level
-            base_close_first = base_kline[0]["close"]
-            if base_close_first > 100:
-                # Index level (~3000) → scale to average price (~15)
-                scale = avg_price_now / base_close_first
-            else:
-                scale = 1.0
-
-            result = []
-            prev_close = None
-            for k in base_kline:
-                c = round(k["close"] * scale, 2)
-                o = round(k["open"] * scale, 2)
-                h = round(k["high"] * scale, 2)
-                l = round(k["low"] * scale, 2)
-                v = k.get("volume", 0)
-                result.append({
-                    "date": k["date"],
-                    "open": o,
-                    "close": c,
-                    "high": h,
-                    "low": l,
-                    "volume": v,
-                })
-                prev_close = c
-
-            self._cache_set(cache_key, result)
-            return {"data": result}
+            quote = self.get_realtime_quote(symbol) or {}
         except Exception as e:
-            print(f"[DataEngine] Avg price kline error: {e}")
+            print(f"[DataEngine] insight quote failed {symbol}: {e}")
 
-        return self._fallback_avg_price_kline(count, cache_key)
+        # Enrich with extra Tencent fields when possible
+        market = self._enrich_market_snapshot(symbol, quote)
 
-    def _fallback_avg_price_kline(self, count: int, cache_key: str) -> dict:
-        """Fallback: generate synthetic average price K-line."""
-        fallback = self.generate_fallback_kline("AVG.SZ", "1d", count)
-        result = {"data": fallback} if fallback else {"data": []}
-        self._cache_set(cache_key, result)
-        return result
+        company = self.get_company_profile(symbol)
+        news = self.get_stock_news(symbol, limit=8)
+
+        payload = {
+            "symbol": symbol,
+            "name": (
+                company.get("name")
+                or market.get("name")
+                or quote.get("name")
+                or self.lookup_stock_name(symbol)
+            ),
+            "company": company,
+            "market": market,
+            "news": news,
+            "data_source": "realtime",
+        }
+        self._cache_set(cache_key, payload)
+        return payload
+
+    def _enrich_market_snapshot(self, symbol: str, quote: dict) -> dict:
+        """Build market card from quote + optional extra Tencent fields."""
+        base = {
+            "symbol": symbol,
+            "name": quote.get("name") or "",
+            "current_price": float(quote.get("current_price") or 0),
+            "open": float(quote.get("open") or 0),
+            "high": float(quote.get("high") or 0),
+            "low": float(quote.get("low") or 0),
+            "pre_close": float(quote.get("pre_close") or 0),
+            "change": float(quote.get("change") or 0),
+            "change_pct": float(quote.get("change_pct") or 0),
+            "volume": int(quote.get("volume") or 0),
+            "amount": float(quote.get("amount") or 0),
+            "pe": None,
+            "pb": None,
+            "turnover_rate": None,
+            "amplitude": None,
+            "limit_up": None,
+            "limit_down": None,
+            "total_market_cap": None,
+            "circ_market_cap": None,
+            "avg_price": None,
+            "volume_ratio": None,
+        }
+        try:
+            tcode = self._to_tencent(symbol)
+            resp = self._http_get(f"https://qt.gtimg.cn/q={tcode}")
+            text = resp.text.strip()
+            if "=" not in text:
+                return base
+            raw = text.split("=", 1)[1].strip().strip('"').strip(";")
+            fields = raw.split("~")
+
+            def f(i, cast=float):
+                if i >= len(fields) or fields[i] in ("", "-", None):
+                    return None
+                try:
+                    return cast(fields[i])
+                except (TypeError, ValueError):
+                    return None
+
+            if fields[1]:
+                base["name"] = fields[1]
+            # Common Tencent field map (best-effort; indexes vary by board)
+            base["pe"] = f(39) or f(53)
+            base["pb"] = f(46)
+            base["turnover_rate"] = f(38)
+            base["amplitude"] = f(43)
+            base["limit_up"] = f(47)
+            base["limit_down"] = f(48)
+            base["total_market_cap"] = f(45)  # 亿元
+            base["circ_market_cap"] = f(44)
+            base["avg_price"] = f(51)
+            base["volume_ratio"] = f(49)
+        except Exception as e:
+            print(f"[DataEngine] market enrich failed {symbol}: {e}")
+        return base
+
+    def get_company_profile(self, symbol: str) -> dict:
+        """Company profile from East Money F10 CompanySurvey."""
+        symbol = self.normalize_symbol(symbol)
+        cache_key = f"company_{symbol}"
+        cached = self._cache_get(cache_key, "company")
+        if cached:
+            return cached
+
+        code = self._to_em_f10_code(symbol)
+        url = (
+            "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/"
+            f"CompanySurveyAjax?code={code}"
+        )
+        profile = {
+            "name": self.lookup_stock_name(symbol),
+            "code": symbol,
+            "industry": "",
+            "region": "",
+            "chairman": "",
+            "secretary": "",
+            "website": "",
+            "employees": "",
+            "list_date": "",
+            "found_date": "",
+            "main_business": "",
+            "intro": "",
+            "office": "",
+        }
+        try:
+            resp = self.http.get(
+                url,
+                headers={
+                    **_DEFAULT_HEADERS,
+                    "Referer": "https://emweb.securities.eastmoney.com/",
+                },
+                timeout=12.0,
+            )
+            resp.raise_for_status()
+            data = resp.json() if resp.content else {}
+            jb = data.get("jbzl") or data.get("Jbzl") or {}
+            if isinstance(jb, dict) and jb:
+                profile.update({
+                    "name": jb.get("agjc") or jb.get("gsmc") or profile["name"],
+                    "industry": jb.get("sshy") or jb.get("sshyName") or "",
+                    "region": jb.get("ssdq") or jb.get("dq") or "",
+                    "chairman": jb.get("fddbr") or jb.get("dsz") or "",
+                    "secretary": jb.get("dm") or jb.get("ms") or "",
+                    "website": jb.get("gswz") or jb.get("wz") or "",
+                    "employees": str(jb.get("gyrs") or jb.get("zgrs") or ""),
+                    "list_date": jb.get("ssrq") or "",
+                    "found_date": jb.get("clrq") or "",
+                    "main_business": jb.get("jyfw") or jb.get("zygcyw") or "",
+                    "intro": jb.get("gsjj") or "",
+                    "office": jb.get("bgdz") or jb.get("zcdz") or "",
+                })
+            self._cache_set(cache_key, profile)
+        except Exception as e:
+            print(f"[DataEngine] company profile failed {symbol}: {e}")
+        return profile
+
+    def get_stock_news(self, symbol: str, limit: int = 8) -> list:
+        """Related news / notices for a stock (Tencent → East Money ann)."""
+        symbol = self.normalize_symbol(symbol)
+        cache_key = f"news_{symbol}_{limit}"
+        cached = self._cache_get(cache_key, "news")
+        if cached:
+            return cached
+
+        items = self._fetch_tencent_news(symbol, limit) or []
+        if len(items) < 3:
+            anns = self._fetch_em_announcements(symbol, limit)
+            # Merge by title, prefer news first
+            seen = {x.get("title") for x in items}
+            for a in anns:
+                if a.get("title") and a["title"] not in seen:
+                    items.append(a)
+                    seen.add(a["title"])
+                if len(items) >= limit:
+                    break
+
+        items = items[:limit]
+        self._cache_set(cache_key, items)
+        return items
+
+    def _fetch_tencent_news(self, symbol: str, limit: int = 8) -> list:
+        tcode = self._to_tencent(symbol)
+        urls = (
+            f"https://proxy.finance.qq.com/ifzqgtimg/appstock/news/info/search"
+            f"?symbol={tcode}&page=1&n={limit}&type=1",
+            f"https://proxy.finance.qq.com/ifzqgtimg/appstock/news/info/search"
+            f"?symbol={tcode}&page=1&n={limit}",
+        )
+        for url in urls:
+            try:
+                resp = self._http_get(url)
+                data = resp.json()
+                rows = (
+                    (data.get("data") or {}).get("data")
+                    or (data.get("data") or {}).get("news")
+                    or data.get("data")
+                    or []
+                )
+                if isinstance(rows, dict):
+                    rows = rows.get("data") or rows.get("list") or []
+                out = []
+                for row in rows or []:
+                    if not isinstance(row, dict):
+                        continue
+                    title = (row.get("title") or row.get("u_title") or "").strip()
+                    if not title:
+                        continue
+                    out.append({
+                        "title": re.sub(r"<[^>]+>", "", title),
+                        "time": row.get("time") or row.get("u_time") or row.get("datetime") or "",
+                        "source": row.get("source") or row.get("u_source") or "腾讯财经",
+                        "url": row.get("url") or row.get("u_url") or row.get("jump_url") or "",
+                        "type": "news",
+                    })
+                if out:
+                    return out[:limit]
+            except Exception as e:
+                print(f"[DataEngine] tencent news failed {symbol}: {e}")
+        return []
+
+    def _fetch_em_announcements(self, symbol: str, limit: int = 8) -> list:
+        bare = symbol.split(".")[0]
+        url = (
+            "https://np-anotice-stock.eastmoney.com/api/security/ann"
+            f"?sr=-1&page_size={limit}&page_index=1&ann_type=A"
+            f"&client_source=web&stock_list={bare}&f_node=0"
+        )
+        try:
+            resp = self.http.get(
+                url,
+                headers={
+                    **_DEFAULT_HEADERS,
+                    "Referer": "https://data.eastmoney.com/",
+                },
+                timeout=12.0,
+            )
+            resp.raise_for_status()
+            data = resp.json() if resp.content else {}
+            rows = (data.get("data") or {}).get("list") or data.get("list") or []
+            out = []
+            for row in rows:
+                title = (row.get("title") or row.get("notice_title") or "").strip()
+                if not title:
+                    continue
+                art_code = row.get("art_code") or row.get("info_code") or ""
+                link = ""
+                if art_code:
+                    link = f"https://data.eastmoney.com/notices/detail/{bare}/{art_code}.html"
+                out.append({
+                    "title": title,
+                    "time": row.get("notice_date") or row.get("display_time") or "",
+                    "source": "东财公告",
+                    "url": link,
+                    "type": "announcement",
+                })
+            return out[:limit]
+        except Exception as e:
+            print(f"[DataEngine] em ann failed {symbol}: {e}")
+            return []
 
 
 from app.core.config import settings

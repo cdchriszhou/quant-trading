@@ -29,7 +29,7 @@ class BacktestEngine:
     """Backtesting engine with 2-layer pre-filtering, comparison mode, and param optimization."""
 
     def run(self, strategy_type: str, parameters: dict, symbols: list,
-            start_date: str, end_date: str, initial_capital: float = 100000.0,
+            start_date: str, end_date: str, initial_capital: float = 1000000.0,
             commission_rate: float = 0.00025, slippage: float = 0.001,
             enable_env_filter: bool = True,
             enable_sector_filter: bool = True,
@@ -43,11 +43,33 @@ class BacktestEngine:
 
         if not symbols:
             symbols = ["000001.SZ"]
+        symbols = [data_engine.normalize_symbol(s) for s in symbols]
+
+        requested_start, requested_end = start_date, end_date
+        start_date, end_date, date_notes = self._clamp_backtest_dates(start_date, end_date)
 
         # ── Run with filters ──
         filtered_df, filter_info = self._apply_pre_filters(
             symbols, start_date, end_date, enable_env_filter, enable_sector_filter
         )
+        filter_info["requested_start"] = requested_start
+        filter_info["requested_end"] = requested_end
+        filter_info["effective_start"] = start_date
+        filter_info["effective_end"] = end_date
+        if date_notes:
+            filter_info["date_notes"] = date_notes
+
+        # Actual data window may be shorter than requested (weekends / holidays / API lag)
+        data_start, data_end = self._data_window(filtered_df)
+        if data_start and data_end:
+            filter_info["data_start"] = data_start
+            filter_info["data_end"] = data_end
+            if data_end < end_date:
+                date_notes.append(
+                    f"行情最新仅到 {data_end}（周末/节假日或数据延迟），"
+                    f"晚于该日的结束日期不会产生新交易"
+                )
+                filter_info["date_notes"] = date_notes
 
         filtered_result = self._run_single(
             strategy_type, parameters, filtered_df, symbols,
@@ -56,15 +78,28 @@ class BacktestEngine:
         )
         filtered_result["filter_info"] = filter_info
 
+        if filtered_result.get("status") == "failed":
+            return {
+                "status": "failed",
+                "error": filtered_result.get("error") or "回测失败",
+                "strategy_type": strategy_type,
+                "parameters": parameters,
+                "symbols": symbols,
+                "start_date": start_date,
+                "end_date": end_date,
+                "filtered_result": filtered_result,
+            }
+
         result = {
             "status": "completed",
             "strategy_type": strategy_type,
             "parameters": parameters,
             "symbols": symbols,
             "start_date": start_date,
-            "end_date": end_date,
+            "end_date": data_end or end_date,
             "initial_capital": initial_capital,
             "filtered_result": filtered_result,
+            "date_notes": date_notes,
         }
 
         # ── Run without filters (comparison) ──
@@ -79,9 +114,49 @@ class BacktestEngine:
                 risk_rules=risk_rules,
             )
             result["unfiltered_result"] = unfiltered_result
-            result["comparison"] = self._compute_comparison(filtered_result, unfiltered_result)
+            if unfiltered_result.get("status") == "completed":
+                result["comparison"] = self._compute_comparison(
+                    filtered_result, unfiltered_result
+                )
+            else:
+                date_notes.append(
+                    "无筛选对照回测失败，已跳过对比："
+                    + str(unfiltered_result.get("error") or "未知错误")
+                )
+                result["date_notes"] = date_notes
 
         return result
+
+    @staticmethod
+    def _clamp_backtest_dates(start_date: str, end_date: str) -> tuple[str, str, list]:
+        """Clamp end date to today; ensure start <= end. Returns notes for UI."""
+        notes: list = []
+        today = datetime.now().strftime("%Y-%m-%d")
+        sd = (start_date or "")[:10]
+        ed = (end_date or "")[:10]
+        if not sd:
+            sd = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
+        if not ed:
+            ed = today
+        if ed > today:
+            notes.append(f"结束日期 {ed} 尚未开盘，已截断为今天 {today}")
+            ed = today
+        if sd > ed:
+            notes.append(f"开始日期晚于结束日期，已调整为 {ed}")
+            sd = ed
+        return sd, ed, notes
+
+    @staticmethod
+    def _data_window(df_dict: dict) -> tuple[Optional[str], Optional[str]]:
+        firsts, lasts = [], []
+        for df in (df_dict or {}).values():
+            if df is None or df.empty or "date" not in df.columns:
+                continue
+            firsts.append(str(df["date"].iloc[0])[:10])
+            lasts.append(str(df["date"].iloc[-1])[:10])
+        if not lasts:
+            return None, None
+        return min(firsts), max(lasts)
 
     # ── Pre-filtering logic ────────────────────────────────────────
 
@@ -125,21 +200,19 @@ class BacktestEngine:
                 df["env_permitted"] = 1
 
         # Layer 2: Sector filter
+        # Historical sector rankings are not stored yet — using "current top sectors"
+        # would inject look-ahead bias. Skip filter and record the reason.
         if enable_sector:
-            top_sector_stocks = self._get_top_sector_stocks()
-            filter_info["sectors_used"] = top_sector_stocks.get("sectors", [])
-            allowed_set = set(top_sector_stocks.get("stocks", []))
-            if allowed_set:
-                for sym, df in df_dict.items():
-                    df["sector_permitted"] = 1 if sym in allowed_set else 0
-                # Count stocks filtered out
-                filter_info["stocks_filtered_out"] = sum(
-                    1 for s in symbols if s not in allowed_set
-                )
-            else:
-                for sym, df in df_dict.items():
-                    df["sector_permitted"] = 1
+            filter_info["sector_filter_applied"] = False
+            filter_info["sector_filter_skipped_reason"] = (
+                "无历史板块排名数据，已跳过板块过滤以避免前视偏差"
+            )
+            filter_info["sectors_used"] = []
+            filter_info["stocks_filtered_out"] = 0
+            for sym, df in df_dict.items():
+                df["sector_permitted"] = 1
         else:
+            filter_info["sector_filter_applied"] = False
             for sym, df in df_dict.items():
                 df["sector_permitted"] = 1
 
@@ -207,7 +280,7 @@ class BacktestEngine:
         """Run a single backtest pass on the (potentially pre-filtered) data."""
 
         if not df_dict:
-            return {"status": "failed", "error": "No data available after filtering"}
+            return {"status": "failed", "error": "无历史行情数据，请检查标的代码或日期区间"}
 
         # Multi-symbol: loop through each and combine results
         all_equity_curves = []
@@ -259,7 +332,10 @@ class BacktestEngine:
                 combined_stats["losing_trades"] += stats["losing_trades"]
 
         if combined_stats is None:
-            return {"status": "failed", "error": "No trades simulated"}
+            return {
+                "status": "failed",
+                "error": f"所选区间内无可用K线（{start_date} ~ {end_date}），请调整日期或标的",
+            }
 
         # Recompute derived stats
         final_cap = combined_stats["final_capital"]
@@ -302,6 +378,7 @@ class BacktestEngine:
         }
 
     def _simulate(self, df: pd.DataFrame, initial_capital: float,
+<<<<<<< HEAD
                   commission_rate: float, slippage: float,
                   risk_rules: list = None) -> tuple:
         """Simulate trading on signal data. Uses t+1 execution to avoid future leakage.
@@ -312,9 +389,21 @@ class BacktestEngine:
                        Supported types: order_amount, position_pct, total_stocks,
                                        daily_loss, max_daily_loss, drawdown.
         """
+=======
+                  commission_rate: float, slippage: float) -> tuple:
+        """Simulate trading on signal data. Uses t+1 execution to avoid future leakage.
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
+        Aligns with live rules: 100-share lots, T+1 sell lock, A-share fee_engine.
+        ``commission_rate`` kept for API compatibility (fee_engine uses settings).
+        """
+        from app.engine.fee_engine import fee_engine
+        from app.engine.trading_engine import LOT_SIZE
+
+        _ = commission_rate  # settings-driven fees preferred
         capital = initial_capital
         position = 0.0
+        available = 0.0
         avg_entry_price = 0.0
         trades = []
         equity_curve = []
@@ -322,7 +411,7 @@ class BacktestEngine:
 
         prev_buy_signal = False
         prev_sell_signal = False
-        prev_price = 0.0
+        last_date = None
 
         # ── Risk state tracking ──
         daily_loss = 0.0
@@ -330,11 +419,12 @@ class BacktestEngine:
         total_stocks_held = 0
 
         for idx, row in df.iterrows():
-            price = row["close"]
-            buy_signal = row.get("buy_signal", False)
-            sell_signal = row.get("sell_signal", False)
+            price = float(row["close"])
+            buy_signal = bool(row.get("buy_signal", False))
+            sell_signal = bool(row.get("sell_signal", False))
             date_str = str(row.get("date", ""))
 
+<<<<<<< HEAD
             # Reset daily loss when date changes
             if date_str != current_date:
                 daily_loss = 0.0
@@ -404,15 +494,56 @@ class BacktestEngine:
                     capital -= total_cost
                     avg_entry_price = total_cost_basis / position if position > 0 else 0
                     total_stocks_held += 1
+=======
+            if last_date is not None and date_str != last_date:
+                available = position
+            last_date = date_str
+
+            equity = capital + position * price
+            equity_curve.append({"date": date_str, "equity": round(equity, 2)})
+
+            if prev_buy_signal and capital > 0 and price > 0:
+                buy_amount = capital * 0.95
+                raw_shares = buy_amount / (price * (1 + slippage))
+                shares = float(int(raw_shares // LOT_SIZE) * LOT_SIZE)
+                if shares >= LOT_SIZE:
+                    fill_price = price * (1 + slippage)
+                    fees = fee_engine.calculate("buy", fill_price, shares)
+                    total_cost = fees.amount + fees.total
+                    if total_cost <= capital + 1e-6:
+                        lot_cost = fees.amount + fees.total
+                        total_cost_basis = position * avg_entry_price + lot_cost
+                        position += shares
+                        capital -= total_cost
+                        avg_entry_price = total_cost_basis / position if position > 0 else 0
+                        trades.append({
+                            "date": date_str,
+                            "side": "buy",
+                            "price": round(fill_price, 2),
+                            "quantity": round(shares, 2),
+                            "amount": round(fees.amount, 2),
+                            "commission": round(fees.total, 2),
+                            "pnl": 0,
+                        })
+
+            elif prev_sell_signal and available > 0 and price > 0:
+                sell_qty = float(int(available // LOT_SIZE) * LOT_SIZE) if available >= LOT_SIZE else available
+                if sell_qty > 0:
+                    fill_price = price * (1 - slippage)
+                    fees = fee_engine.calculate("sell", fill_price, sell_qty)
+                    total_received = fees.amount - fees.total
+                    pnl = total_received - (sell_qty * avg_entry_price)
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                     trades.append({
                         "date": date_str,
-                        "side": "buy",
-                        "price": round(price, 2),
-                        "quantity": round(shares, 2),
-                        "amount": round(total_cost, 2),
-                        "commission": round(commission, 2),
-                        "pnl": 0,
+                        "side": "sell",
+                        "price": round(fill_price, 2),
+                        "quantity": round(sell_qty, 2),
+                        "amount": round(fees.amount, 2),
+                        "commission": round(fees.total, 2),
+                        "pnl": round(pnl, 2),
                     })
+<<<<<<< HEAD
                 elif risk_blocked:
                     trades.append({
                         "date": date_str,
@@ -445,19 +576,31 @@ class BacktestEngine:
                 position = 0.0
                 avg_entry_price = 0.0
                 total_stocks_held = 0
+=======
+                    capital += total_received
+                    position -= sell_qty
+                    available -= sell_qty
+                    if position <= 1e-9:
+                        position = 0.0
+                        available = 0.0
+                        avg_entry_price = 0.0
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
             prev_buy_signal = buy_signal
             prev_sell_signal = sell_signal
-            prev_price = price
 
-        # Final equity (liquidate remaining position at last price)
-        final_price = df["close"].iloc[-1] if len(df) > 0 else 0
+        final_price = float(df["close"].iloc[-1]) if len(df) > 0 else 0
         final_capital = capital + position * final_price
 
+<<<<<<< HEAD
         # Stats
         filled_trades = [t for t in trades if not t.get("risk_rejected")]
         winning_trades = len([t for t in filled_trades if t["side"] == "sell" and t.get("pnl", 0) > 0])
         losing_trades = len([t for t in filled_trades if t["side"] == "sell" and t.get("pnl", 0) <= 0])
+=======
+        winning_trades = len([t for t in trades if t["side"] == "sell" and t.get("pnl", 0) > 0])
+        losing_trades = len([t for t in trades if t["side"] == "sell" and t.get("pnl", 0) <= 0])
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         stats = {
             "final_capital": final_capital,
@@ -568,9 +711,10 @@ class BacktestEngine:
             "consecutive_losses_filtered": f_cl,
             "consecutive_losses_unfiltered": u_cl,
             "summary": (
-                f"增加大盘+板块筛选后：收益率变化 {f_ret - u_ret:+.1f}%，"
-                f"最大回撤变化 {u_dd - f_dd:+.1f}%（负数=改善），"
+                f"增加大盘环境筛选后：收益率变化 {f_ret - u_ret:+.1f}%，"
+                f"最大回撤变化 {u_dd - f_dd:+.1f}%（正数=回撤变小为改善），"
                 f"胜率变化 {f_wr - u_wr:+.1f}%"
+                "（板块历史排名暂未启用，对比不含板块过滤）"
             ),
         }
 
@@ -578,7 +722,7 @@ class BacktestEngine:
 
     def optimize(self, strategy_type: str, base_parameters: dict, symbols: list,
                  start_date: str, end_date: str,
-                 initial_capital: float = 100000.0,
+                 initial_capital: float = 1000000.0,
                  enable_env_filter: bool = True,
                  enable_sector_filter: bool = True) -> dict:
         """Auto-test parameter combinations to find the most stable set.

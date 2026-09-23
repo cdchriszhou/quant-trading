@@ -1,25 +1,78 @@
 <template>
   <div>
+    <!-- 我的持仓实时行情（优先展示已买入标的） -->
+    <el-card shadow="never" style="margin-bottom: 16px">
+      <template #header>
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px">
+          <span style="font-weight: bold">我的持仓行情</span>
+          <span style="font-size: 12px; color: #909399">
+            {{ holdingsLoading ? '加载持仓中…' : (holdings.length ? `共 ${holdings.length} 只 · 约15秒刷新` : '暂无持仓') }}
+          </span>
+        </div>
+      </template>
+      <div v-if="holdingsLoading" style="padding: 12px; color: #909399; font-size: 13px">正在读取当前账户持仓…</div>
+      <el-empty v-else-if="!holdings.length" description="当前账户暂无持仓，可在下方搜索任意股票查看行情" :image-size="64" />
+      <div v-else class="holding-grid">
+        <button
+          v-for="h in holdings"
+          :key="h.symbol"
+          type="button"
+          class="holding-card"
+          :class="{ active: selectedSymbol === h.symbol }"
+          @click="selectSymbol(h.symbol)"
+        >
+          <div class="holding-top">
+            <div style="min-width: 0">
+              <StockTicker :symbol="h.symbol" :row="h" />
+              <div class="holding-code">持仓 {{ h.quantity }}</div>
+            </div>
+            <div class="holding-px" :style="{ color: pctColor(holdingQuote(h.symbol)?.change_pct ?? h.unrealized_pnl_pct) }">
+              {{ formatPrice(holdingQuote(h.symbol)?.current_price ?? h.current_price) }}
+            </div>
+          </div>
+          <div class="holding-bottom">
+            <span :style="{ color: pctColor(holdingQuote(h.symbol)?.change_pct) }">
+              {{ formatPct(holdingQuote(h.symbol)?.change_pct) }}
+            </span>
+            <span :style="{ color: pctColor(h.unrealized_pnl) }">
+              盈亏 {{ formatSignedMoney(h.unrealized_pnl) }}
+            </span>
+          </div>
+        </button>
+      </div>
+    </el-card>
+
     <el-card shadow="never" style="margin-bottom: 16px">
       <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap">
-        <el-select v-model="selectedSymbol" filterable placeholder="选择标的" style="width: 200px" @change="loadData">
+        <span style="font-size: 13px; color: #6b7280; white-space: nowrap">查看其他股票</span>
+        <el-select
+          v-model="selectedSymbol"
+          filterable
+          remote
+          clearable
+          :remote-method="remoteSearch"
+          :loading="symLoading"
+          placeholder="输入代码或名称搜索"
+          style="width: 260px"
+          @change="onSearchChange"
+        >
           <el-option v-for="s in symbols" :key="s.code" :label="`${s.code} - ${s.name}`" :value="s.code" />
         </el-select>
-        <el-radio-group v-model="selectedPeriod" @change="loadData">
+        <el-radio-group v-model="selectedPeriod" :disabled="!selectedSymbol" @change="loadData">
           <el-radio-button value="1d">日K</el-radio-button>
           <el-radio-button value="1w">周K</el-radio-button>
           <el-radio-button value="30m">30分</el-radio-button>
         </el-radio-group>
-        <span v-if="symbolsLoadError" style="color: #f59e0b; font-size: 12px">标的列表加载失败，使用备用列表</span>
+        <span v-if="symbolsLoadError" style="color: #f59e0b; font-size: 12px">真实标的列表加载失败，请检查网络后刷新</span>
       </div>
     </el-card>
 
-    <el-row :gutter="16">
+    <el-row v-if="selectedSymbol" :gutter="16">
       <el-col :xs="24" :md="16">
         <el-card shadow="never" style="margin-bottom: 16px">
           <template #header>
-            <div style="display: flex; justify-content: space-between; align-items: center">
-              <span style="font-weight: bold">K线图</span>
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px">
+              <span style="font-weight: bold">K线图 · {{ displayName }}</span>
               <span v-if="klineError" style="color: #f59e0b; font-size: 12px">数据加载失败，请检查网络</span>
             </div>
           </template>
@@ -36,29 +89,58 @@
       <el-col :xs="24" :md="8">
         <el-card shadow="never" style="margin-bottom: 16px">
           <template #header>
-            <div style="display: flex; justify-content: space-between; align-items: center">
-              <span style="font-weight: bold">实时行情</span>
-              <span v-if="quoteError" style="font-size: 10px; color: #f59e0b">数据异常</span>
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px">
+              <div style="min-width: 0">
+                <div style="font-weight: 700; font-size: 16px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+                  {{ displayName }}
+                </div>
+                <div style="font-size: 12px; color: #909399; margin-top: 2px">
+                  {{ selectedSymbol }}
+                  <template v-if="isHoldingSelected"> · 持仓股分时报价</template>
+                  <template v-else> · 自选查看</template>
+                </div>
+              </div>
+              <span v-if="quoteError" style="font-size: 10px; color: #f59e0b; flex-shrink: 0">数据异常</span>
             </div>
           </template>
           <div v-if="quoteError" style="text-align: center; padding: 20px; color: #909399">
             <el-icon :size="32" style="color: #e5e7eb"><WarningFilled /></el-icon>
             <p style="margin-top: 8px">行情数据获取失败</p>
           </div>
-          <div v-else-if="quote" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px">
-            <div><span style="color: #909399">最新价</span><br><span style="font-size: 24px; font-weight: bold">{{ quote.current_price }}</span></div>
-            <div><span style="color: #909399">涨跌幅</span><br><span :style="{ fontSize: '24px', fontWeight: 'bold', color: (quote.change_pct || 0) > 0 ? '#ef4444' : '#10b981' }">{{ quote.change_pct }}%</span></div>
-            <div><span style="color: #909399">最高</span><br><span>{{ quote.high }}</span></div>
-            <div><span style="color: #909399">最低</span><br><span>{{ quote.low }}</span></div>
-            <div><span style="color: #909399">开盘</span><br><span>{{ quote.open }}</span></div>
-            <div><span style="color: #909399">昨收</span><br><span>{{ quote.pre_close }}</span></div>
-            <div><span style="color: #909399">成交量</span><br><span>{{ (quote.volume / 10000).toFixed(0) }}万</span></div>
-            <div><span style="color: #909399">成交额</span><br><span>{{ quote.amount }}亿</span></div>
+          <div v-else-if="quote">
+            <div style="display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; flex-wrap: wrap">
+              <span :style="{ fontSize: '28px', fontWeight: 800, color: quoteColor, fontVariantNumeric: 'tabular-nums' }">
+                {{ formatPrice(quote.current_price) }}
+              </span>
+              <span :style="{ fontSize: '16px', fontWeight: 700, color: quoteColor }">
+                {{ formatSigned(quote.change) }}
+              </span>
+              <span :style="{ fontSize: '16px', fontWeight: 700, color: quoteColor }">
+                {{ formatPct(quote.change_pct) }}
+              </span>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; font-size: 13px">
+              <div class="q-row"><span class="q-label">今开</span><span class="q-val">{{ formatPrice(quote.open) }}</span></div>
+              <div class="q-row"><span class="q-label">昨收</span><span class="q-val">{{ formatPrice(quote.pre_close) }}</span></div>
+              <div class="q-row"><span class="q-label">最高</span><span class="q-val">{{ formatPrice(quote.high) }}</span></div>
+              <div class="q-row"><span class="q-label">最低</span><span class="q-val">{{ formatPrice(quote.low) }}</span></div>
+              <div class="q-row"><span class="q-label">成交量</span><span class="q-val">{{ formatVolume(quote.volume) }}</span></div>
+              <div class="q-row"><span class="q-label">成交额</span><span class="q-val">{{ formatAmount(quote.amount) }}</span></div>
+            </div>
+            <div v-if="selectedHolding" style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #f0f0f0; font-size: 12px; color: #6b7280; display: grid; grid-template-columns: 1fr 1fr; gap: 8px">
+              <div>成本均价 <b style="color:#1f2937">{{ formatPrice(selectedHolding.avg_cost) }}</b></div>
+              <div>持仓市值 <b style="color:#1f2937">{{ formatSignedMoney(selectedHolding.market_value, false) }}</b></div>
+              <div>浮动盈亏 <b :style="{ color: pctColor(selectedHolding.unrealized_pnl) }">{{ formatSignedMoney(selectedHolding.unrealized_pnl) }}</b></div>
+              <div>盈亏比例 <b :style="{ color: pctColor(selectedHolding.unrealized_pnl_pct) }">{{ formatPct(selectedHolding.unrealized_pnl_pct) }}</b></div>
+            </div>
           </div>
           <div v-else style="text-align: center; padding: 20px; color: #909399">加载中...</div>
         </el-card>
       </el-col>
     </el-row>
+    <el-card v-else shadow="never" style="margin-bottom: 16px">
+      <el-empty description="请先买入股票，或在上方搜索标的查看行情" :image-size="72" />
+    </el-card>
 
     <!-- 主流板块 -->
     <el-card shadow="never">
@@ -71,7 +153,9 @@
       <div v-if="sectorsError" style="text-align: center; padding: 20px; color: #909399">
         <el-icon :size="32" style="color: #e5e7eb"><WarningFilled /></el-icon>
         <p style="margin-top: 8px">板块数据加载失败</p>
+        <el-button type="primary" size="small" style="margin-top: 10px" :loading="sectorsLoading" @click="loadSectors">重试</el-button>
       </div>
+      <div v-else-if="sectorsLoading && !sectors.length" style="text-align: center; padding: 20px; color: #909399">加载中...</div>
       <div v-else-if="sectors.length" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px">
         <div
           v-for="s in sectors"
@@ -162,44 +246,257 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { marketApi } from '@/api/market'
+import { tradingApi } from '@/api/trading'
+import { displayStockName, ensureStockNames } from '@/utils/stockNames'
 import * as echarts from 'echarts'
 
-const selectedSymbol = ref('000001.SZ')
+const selectedSymbol = ref('')
 const selectedPeriod = ref('1d')
 const symbols = ref([])
 const symbolsLoadError = ref(false)
+const symLoading = ref(false)
 const quote = ref(null)
 const quoteError = ref(false)
 const klineError = ref(false)
 const sectors = ref([])
 const sectorsError = ref(false)
+const sectorsLoading = ref(false)
 const sectorDialogVisible = ref(false)
 const selectedSector = ref(null)
 const sectorStocks = ref([])
 const sectorStocksLoading = ref(false)
 const sectorStocksError = ref(false)
+const holdings = ref([])
+const holdingsLoading = ref(true)
+const holdingQuotes = ref({})
 const klineChartRef = ref(null)
 let klineChart = null
 let quoteInterval = null
+let holdingsInterval = null
 let sectorsInterval = null
 
-async function loadSymbols() {
-  symbolsLoadError.value = false
+const isHoldingSelected = computed(() =>
+  holdings.value.some((h) => h.symbol === selectedSymbol.value)
+)
+
+const selectedHolding = computed(() =>
+  holdings.value.find((h) => h.symbol === selectedSymbol.value) || null
+)
+
+const displayName = computed(() => {
+  const fromQuote = (quote.value && quote.value.name) || ''
+  if (fromQuote && fromQuote !== selectedSymbol.value) return fromQuote
+  const hold = selectedHolding.value
+  if (hold) {
+    const n = displayStockName(hold) || hold.name
+    if (n) return n
+  }
+  const hit = symbols.value.find((s) => s.code === selectedSymbol.value)
+  if (hit && hit.name && hit.name !== hit.code) return hit.name
+  return fromQuote || selectedSymbol.value || '—'
+})
+
+const quoteColor = computed(() => pctColor(quote.value?.change_pct))
+
+function formatCode(symbol) {
+  return (symbol || '').replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
+}
+
+function holdingName(h) {
+  return displayStockName(h) || h.name || formatCode(h.symbol)
+}
+
+function holdingQuote(symbol) {
+  return holdingQuotes.value[symbol] || null
+}
+
+function pctColor(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n === 0) return '#374151'
+  return n > 0 ? '#ef4444' : '#10b981'
+}
+
+function formatPrice(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '-'
+  return n.toFixed(2)
+}
+
+function formatSigned(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '-'
+  const s = n.toFixed(2)
+  return n > 0 ? `+${s}` : s
+}
+
+function formatSignedMoney(v, withSign = true) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '-'
+  const s = Math.abs(n).toFixed(2)
+  if (!withSign) return s
+  return n > 0 ? `+${s}` : n < 0 ? `-${s}` : s
+}
+
+function formatPct(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return '-'
+  const s = n.toFixed(2)
+  return n > 0 ? `+${s}%` : `${s}%`
+}
+
+function formatVolume(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return '-'
+  if (n >= 10000) return `${(n / 10000).toFixed(0)} 万股`
+  return `${n} 股`
+}
+
+function formatAmount(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return '-'
+  if (n >= 1) return `${n.toFixed(2)} 亿元`
+  if (n >= 0.01) return `${(n * 10000).toFixed(0)} 万元`
+  return `${(n * 1e8).toFixed(0)} 元`
+}
+
+function selectSymbol(symbol) {
+  if (!symbol || selectedSymbol.value === symbol) {
+    if (symbol) loadData()
+    return
+  }
+  selectedSymbol.value = symbol
+  loadData()
+}
+
+function onSearchChange(val) {
+  if (!val) {
+    quote.value = null
+    if (klineChart) {
+      klineChart.dispose()
+      klineChart = null
+    }
+    return
+  }
+  loadData()
+}
+
+async function loadHoldings({ preferKeepSelection = false } = {}) {
+  holdingsLoading.value = true
   try {
-    const res = await marketApi.searchSymbols()
-    symbols.value = res.data || []
-    if (!symbols.value.length) {
-      symbolsLoadError.value = true
+    const res = await tradingApi.getPositions()
+    const rows = (res.data || []).filter((p) => Number(p.quantity) > 0)
+    // 同一标的可能多策略拆行：按 symbol 合并展示
+    const merged = new Map()
+    for (const p of rows) {
+      const key = p.symbol
+      if (!key) continue
+      if (!merged.has(key)) {
+        merged.set(key, { ...p })
+      } else {
+        const cur = merged.get(key)
+        const q1 = Number(cur.quantity) || 0
+        const q2 = Number(p.quantity) || 0
+        const mv1 = Number(cur.market_value) || 0
+        const mv2 = Number(p.market_value) || 0
+        const pnl1 = Number(cur.unrealized_pnl) || 0
+        const pnl2 = Number(p.unrealized_pnl) || 0
+        cur.quantity = q1 + q2
+        cur.available_quantity = (Number(cur.available_quantity) || 0) + (Number(p.available_quantity) || 0)
+        cur.market_value = mv1 + mv2
+        cur.unrealized_pnl = pnl1 + pnl2
+        const costNotional = (Number(cur.avg_cost) || 0) * q1 + (Number(p.avg_cost) || 0) * q2
+        cur.avg_cost = cur.quantity > 0 ? costNotional / cur.quantity : 0
+        cur.unrealized_pnl_pct = cur.market_value - cur.unrealized_pnl > 0
+          ? (cur.unrealized_pnl / (cur.market_value - cur.unrealized_pnl)) * 100
+          : 0
+      }
+    }
+    holdings.value = Array.from(merged.values())
+    await ensureStockNames(holdings.value.map((p) => p.symbol))
+    await refreshHoldingQuotes()
+
+    const stillSelected = holdings.value.some((h) => h.symbol === selectedSymbol.value)
+    if (!preferKeepSelection || !stillSelected) {
+      if (holdings.value.length && !stillSelected) {
+        selectedSymbol.value = holdings.value[0].symbol
+      }
     }
   } catch (e) {
+    console.error('loadHoldings error:', e)
+    holdings.value = []
+  } finally {
+    holdingsLoading.value = false
+  }
+}
+
+async function refreshHoldingQuotes() {
+  const list = holdings.value
+  if (!list.length) {
+    holdingQuotes.value = {}
+    return
+  }
+  const next = { ...holdingQuotes.value }
+  await Promise.all(
+    list.map(async (h) => {
+      try {
+        const q = await marketApi.getQuote(h.symbol)
+        next[h.symbol] = q
+        // 同步持仓现价展示
+        if (q && Number(q.current_price) > 0) {
+          h.current_price = q.current_price
+        }
+      } catch {
+        /* keep previous */
+      }
+    })
+  )
+  holdingQuotes.value = next
+  // 若当前选中是持仓股，顺带刷新右侧详情报价
+  if (selectedSymbol.value && next[selectedSymbol.value]) {
+    quote.value = next[selectedSymbol.value]
+    quoteError.value = false
+  }
+}
+
+async function loadSymbols(query = '') {
+  symbolsLoadError.value = false
+  try {
+    const res = await marketApi.searchSymbols(query)
+    const list = res.data || []
+    const cur = selectedSymbol.value
+    if (cur && !list.some((s) => s.code === cur)) {
+      const hold = holdings.value.find((h) => h.symbol === cur)
+      list.unshift({ code: cur, name: hold ? holdingName(hold) : cur })
+    }
+    symbols.value = list
+    if (!query && !symbols.value.length) symbolsLoadError.value = true
+  } catch (e) {
     console.error('loadSymbols error:', e)
-    symbolsLoadError.value = true
+    if (!query) symbolsLoadError.value = true
+  }
+}
+
+async function remoteSearch(query) {
+  const q = (query || '').trim()
+  if (!q) {
+    await loadSymbols()
+    return
+  }
+  symLoading.value = true
+  try {
+    await loadSymbols(q)
+  } finally {
+    symLoading.value = false
   }
 }
 
 async function loadData() {
+  if (!selectedSymbol.value) {
+    quote.value = null
+    return
+  }
   quoteError.value = false
   try {
     const res = await marketApi.getQuote(selectedSymbol.value)
@@ -228,6 +525,7 @@ async function loadData() {
 
 async function loadSectors() {
   sectorsError.value = false
+  sectorsLoading.value = true
   try {
     const res = await marketApi.getSectors(30)
     sectors.value = (res.data || []).sort((a, b) => b.change_pct - a.change_pct)
@@ -237,6 +535,8 @@ async function loadSectors() {
   } catch (e) {
     console.error('loadSectors error:', e)
     sectorsError.value = true
+  } finally {
+    sectorsLoading.value = false
   }
 }
 
@@ -289,7 +589,12 @@ async function retryLoadSectorStocks() {
 }
 
 function renderKline(data) {
+<<<<<<< HEAD
   if (!data.length) return
+=======
+  if (klineChart) klineChart.dispose()
+  if (!data.length || !klineChartRef.value) return
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
   // Reuse chart instance: only create once, update data with setOption
   if (!klineChart) {
@@ -318,18 +623,47 @@ function renderKline(data) {
   })
 }
 
-onMounted(() => {
-  loadSymbols()
-  loadData()
+onMounted(async () => {
+  await loadHoldings()
+  await loadSymbols()
+  if (selectedSymbol.value) {
+    await loadData()
+  }
   loadSectors()
   quoteInterval = setInterval(() => {
+    if (!selectedSymbol.value) return
+    // 持仓行情统一走 refreshHoldingQuotes，避免重复请求
+    if (isHoldingSelected.value) return
     marketApi.getQuote(selectedSymbol.value).then(r => {
       quote.value = r
       quoteError.value = false
     }).catch(() => {
       quoteError.value = true
     })
-  }, 5000)
+  }, 8000)
+  holdingsInterval = setInterval(() => {
+    refreshHoldingQuotes()
+    // 轻量刷新持仓盈亏字段（批量行情后服务端仍有开销，降频到15s）
+    tradingApi.getPositions().then((res) => {
+      const rows = (res.data || []).filter((p) => Number(p.quantity) > 0)
+      if (!rows.length) return
+      // 仅更新盈亏数字，不打断当前选中
+      const bySym = new Map()
+      for (const p of rows) {
+        if (!bySym.has(p.symbol)) bySym.set(p.symbol, { ...p })
+        else {
+          const cur = bySym.get(p.symbol)
+          cur.quantity = (Number(cur.quantity) || 0) + (Number(p.quantity) || 0)
+          cur.market_value = (Number(cur.market_value) || 0) + (Number(p.market_value) || 0)
+          cur.unrealized_pnl = (Number(cur.unrealized_pnl) || 0) + (Number(p.unrealized_pnl) || 0)
+        }
+      }
+      holdings.value = holdings.value.map((h) => {
+        const u = bySym.get(h.symbol)
+        return u ? { ...h, ...u, name: h.name } : h
+      })
+    }).catch(() => {})
+  }, 15000)
   sectorsInterval = setInterval(() => {
     loadSectors()
   }, 30000)
@@ -338,6 +672,80 @@ onMounted(() => {
 onUnmounted(() => {
   if (klineChart) klineChart.dispose()
   if (quoteInterval) clearInterval(quoteInterval)
+  if (holdingsInterval) clearInterval(holdingsInterval)
   if (sectorsInterval) clearInterval(sectorsInterval)
 })
 </script>
+
+<style scoped>
+.q-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.q-label {
+  color: #909399;
+  flex-shrink: 0;
+}
+.q-val {
+  font-weight: 600;
+  color: #1f2937;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.holding-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+.holding-card {
+  text-align: left;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.holding-card:hover {
+  border-color: #99e6e6;
+}
+.holding-card.active {
+  border-color: #00B4B4;
+  box-shadow: 0 0 0 1px #00B4B4 inset;
+  background: #f0fbfb;
+}
+.holding-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+.holding-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.holding-code {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-top: 2px;
+}
+.holding-px {
+  font-size: 18px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.holding-bottom {
+  margin-top: 8px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+}
+</style>

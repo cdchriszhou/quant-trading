@@ -24,18 +24,36 @@ class Position(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
+<<<<<<< HEAD
     def to_dict(self, name: str = ""):
+=======
+    def to_dict(self):
+        from app.models.naming import resolve_symbol_name
+        qty = float(self.quantity or 0)
+        avg = float(self.avg_cost or 0)
+        cur = float(self.current_price or 0)
+        mv = float(self.market_value or 0)
+        if mv <= 0 and cur > 0 and qty > 0:
+            mv = round(cur * qty, 2)
+        cost_total = round(avg * qty, 2) if avg > 0 and qty > 0 else 0.0
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         return {
             "id": self.id,
             "user_id": self.user_id,
             "strategy_id": self.strategy_id,
             "symbol": self.symbol,
+<<<<<<< HEAD
             "name": name,
+=======
+            "symbol_name": resolve_symbol_name(self.symbol),
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
             "quantity": self.quantity,
             "available_quantity": self.available_quantity,
-            "avg_cost": self.avg_cost,
-            "current_price": self.current_price,
-            "market_value": self.market_value,
+            "avg_cost": avg,
+            "cost_price": avg,  # alias: 购入均价
+            "cost_total": cost_total,  # 购入总资金
+            "current_price": cur,
+            "market_value": mv,
             "unrealized_pnl": self.unrealized_pnl,
             "unrealized_pnl_pct": self.unrealized_pnl_pct,
             "realized_pnl": self.realized_pnl,

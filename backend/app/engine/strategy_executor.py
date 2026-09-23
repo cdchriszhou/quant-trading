@@ -16,6 +16,14 @@ from app.engine.risk_engine import risk_engine
 from app.engine.notification_engine import notification_engine
 from app.engine.market_env_engine import market_env_engine
 from app.engine.sector_engine import sector_engine
+from app.engine.market_calendar import (
+    is_a_share_trading_session,
+    next_session_hint,
+    trading_day_start,
+)
+from app.engine.fee_engine import fee_engine
+from app.models.trade import Trade
+from app.models.position import Position as PositionModel
 
 logger = logging.getLogger("strategy_executor")
 
@@ -120,6 +128,7 @@ class StrategyExecutor:
         self._tasks[strategy_id] = task
 
     async def _run_loop(self, strategy_id: int):
+<<<<<<< HEAD
         """Main execution loop for a single strategy. Interval adapts to time_frame."""
         while True:
             db = SessionLocal()
@@ -152,6 +161,63 @@ class StrategyExecutor:
                 db.close()
 
             await asyncio.sleep(interval)
+=======
+        """Main execution loop for a single strategy.
+
+        Heavy sync IO (history/quotes/DB) runs in a worker thread so the
+        asyncio event loop stays responsive for API/WebSocket.
+        """
+        try:
+            while True:
+                try:
+                    keep_running = await asyncio.to_thread(self._tick_once, strategy_id)
+                    if not keep_running:
+                        break
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"[Strategy] Error in strategy {strategy_id}: {e}")
+                await asyncio.sleep(self._interval)
+        finally:
+            self._tasks.pop(strategy_id, None)
+
+    def _tick_once(self, strategy_id: int) -> bool:
+        """One synchronous strategy tick. Returns False when the strategy should stop."""
+        db = SessionLocal()
+        try:
+            strat = db.query(Strategy).filter(Strategy.id == strategy_id).first()
+            if not strat or not strat.is_active or strat.status != "running":
+                return False
+
+            if not strat.symbols:
+                return True
+
+            try:
+                trading_engine.sync_live_orders(db, strat.user_id)
+                trading_engine.match_pending_limits(db, strat.user_id)
+            except Exception as e:
+                logger.warning(f"[Strategy] Order sync skipped: {e}")
+
+            if not is_a_share_trading_session():
+                logger.debug(
+                    f"[Strategy] Skip new orders ({next_session_hint()}) "
+                    f"strategy={strat.id}"
+                )
+                db.commit()
+                return True
+
+            self._execute_signals(db, strat)
+            db.commit()
+            return True
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            db.close()
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
     async def _execute_signals(self, db: Session, strat: Strategy):
         """Fetch data, compute signals, and place orders for one strategy tick.
@@ -208,9 +274,11 @@ class StrategyExecutor:
                                 f"stocks in top {len(top_sectors)} sectors"
                             )
             except Exception as e:
-                logger.warning(f"[Strategy] Sector filter error: {e}, using all symbols")
+                logger.warning(f"[Strategy] Sector filter error: {e}, skipping buy opens")
+                # Fail closed for buys: still allow sells on existing symbols
                 allowed_symbols = set(strat.symbols)
 
+<<<<<<< HEAD
         # ── Batch-fetch quotes for ALL symbols upfront ──
         end_date = datetime.datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.datetime.now() - datetime.timedelta(days=120)).strftime("%Y-%m-%d")
@@ -224,6 +292,26 @@ class StrategyExecutor:
             """Fetch history and compute signals for one symbol in thread pool."""
             df = await loop.run_in_executor(
                 None, data_engine.get_history_data, symbol, start_date, end_date
+=======
+        # Batch realtime quotes once per tick (avoid N serial HTTP)
+        quote_map: dict = {}
+        try:
+            quote_map = data_engine.get_realtime_quotes_batch(list(strat.symbols)) or {}
+        except Exception as e:
+            logger.warning(f"[Strategy] batch quotes skipped: {e}")
+
+        for symbol in strat.symbols:
+            # Check if stock passes sector filter
+            if symbol not in allowed_symbols:
+                # Still allow sell if we hold the name
+                pass
+
+            # Enough bars for MA60 / right_side_entry / trend strategies (~180 trading days)
+            df = data_engine.get_history_data(
+                symbol,
+                start_date=(datetime.datetime.now() - datetime.timedelta(days=280)).strftime("%Y-%m-%d"),
+                end_date=datetime.datetime.now().strftime("%Y-%m-%d"),
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
             )
             if df is None or df.empty:
                 return None
@@ -243,6 +331,7 @@ class StrategyExecutor:
             return_exceptions=True,
         )
 
+<<<<<<< HEAD
         # Batch-fetch real-time quotes for symbols that have signals
         signal_symbols = []
         signal_data = {}
@@ -256,10 +345,17 @@ class StrategyExecutor:
             if buy_signal or sell_signal:
                 signal_symbols.append(sym)
                 signal_data[sym] = (sig_df, buy_signal, sell_signal, latest)
+=======
+            # Get the latest signal
+            latest = signals_df.iloc[-1]
+            buy_signal = bool(latest.get("buy_signal", False))
+            sell_signal = bool(latest.get("sell_signal", False))
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         if not signal_symbols:
             return
 
+<<<<<<< HEAD
         # Batch-fetch quotes for all signal symbols in one go
         quotes_map = await loop.run_in_executor(
             None, data_engine.batch_get_quotes, signal_symbols
@@ -267,6 +363,16 @@ class StrategyExecutor:
 
         # Process each signal
         for symbol, (sig_df, buy_signal, sell_signal, latest) in signal_data.items():
+=======
+            # Prefer sell when both fire — never open while exiting
+            if buy_signal and sell_signal:
+                buy_signal = False
+
+            # Sector filter only blocks new buys
+            if buy_signal and symbol not in allowed_symbols:
+                continue
+
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
             # ── Suppress buy signals when market is not bullish ──
             if buy_signal and buy_locked:
                 logger.info(
@@ -279,6 +385,7 @@ class StrategyExecutor:
                 )
                 continue
 
+<<<<<<< HEAD
             quote = quotes_map.get(symbol, {})
             price = quote.get("current_price", 0)
             if price <= 0:
@@ -286,6 +393,37 @@ class StrategyExecutor:
 
             side = "buy" if buy_signal else "sell"
             quantity = self._calc_quantity(db, strat, symbol, price, side)
+=======
+            side = "buy" if buy_signal else "sell"
+
+            # Dedup: same strategy+symbol+side only once per Shanghai trading day
+            if self._already_acted_today(db, strat, symbol, side):
+                logger.info(
+                    f"[Strategy] Dedup skip {strat.id} {side} {symbol} (already acted today)"
+                )
+                continue
+
+            # Do not pyramid-buy if already holding this symbol for the strategy
+            if side == "buy" and self._has_open_position(db, strat, symbol):
+                logger.info(
+                    f"[Strategy] Skip buy {symbol}: already holding for strategy {strat.id}"
+                )
+                continue
+
+            quote = quote_map.get(symbol)
+            if not quote:
+                try:
+                    quote = data_engine.get_realtime_quote(symbol)
+                except Exception:
+                    continue
+            price = float(quote.get("current_price") or 0)
+            if price <= 0:
+                continue
+
+            quantity = self._calc_quantity(
+                db, strat, price, side, symbol=symbol, price_history=df
+            )
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
             if quantity <= 0:
                 continue
@@ -324,10 +462,29 @@ class StrategyExecutor:
                         reason=reason,
                     )
 
-            # Risk check
+            order_notional = fee_engine.buy_cost(price, quantity) if side == "buy" else price * quantity
+            # Risk check with action semantics
             risk_result = risk_engine.check_order(
-                db, strat.user_id, symbol, side, quantity, price, quantity * price
+                db, strat.user_id, symbol, side, quantity, price, order_notional,
+                trade_mode=strat.mode or None,
             )
+            if risk_result.get("should_pause"):
+                logger.info(f"[Strategy] Risk pause strategy {strat.id}")
+                strat.status = "paused"
+                strat.is_active = False
+                db.commit()
+                notification_engine.risk_blocked(
+                    user_id=strat.user_id,
+                    symbol=symbol,
+                    side=side,
+                    price=price,
+                    strategy_id=strat.id,
+                    strategy_name=strat.name,
+                    violations=risk_result.get("violations", []),
+                )
+                self.stop_strategy(strat.id)
+                return
+
             if not risk_result["passed"]:
                 logger.info(
                     f"[Strategy] Risk blocked {strat.id}: {side} {symbol} x{quantity}"
@@ -343,11 +500,24 @@ class StrategyExecutor:
                 )
                 continue
 
-            # Place order
-            order = trading_engine.place_order(
-                db, strat.user_id, symbol, side, "market", quantity, price,
-                strategy_id=strat.id, remark=f"Auto: {strat.name}"
-            )
+            for warn in risk_result.get("warnings", []):
+                logger.warning(
+                    f"[Strategy] Risk warn {strat.id}: {warn.get('rule_name')} "
+                    f"{warn.get('current_value')} vs {warn.get('threshold')}"
+                )
+
+            # Place order — honor strategy.mode (paper|live); resolve_trade_mode gates live
+            try:
+                from app.engine.trading_engine import TradingEngineError
+                mode = strat.mode or trading_engine.get_user_mode(db, strat.user_id)
+                order = trading_engine.place_order(
+                    db, strat.user_id, symbol, side, "market", quantity, price,
+                    strategy_id=strat.id, remark=f"Auto: {strat.name}",
+                    mode_override=mode,
+                )
+            except TradingEngineError as e:
+                logger.info(f"[Strategy] Order rejected {strat.id}: {e}")
+                continue
             logger.info(
                 f"[Strategy] Placed {side} {symbol} x{quantity} @ {price} "
                 f"for strategy {strat.id}: {strat.name}"
@@ -365,6 +535,7 @@ class StrategyExecutor:
                 order_id=order.id if order else 0,
             )
 
+<<<<<<< HEAD
     def _calc_quantity(self, db: Session, strat: Strategy, symbol: str, price: float, side: str) -> float:
         """Calculate order quantity based on strategy type and capital."""
         if side == "sell":
@@ -377,12 +548,74 @@ class StrategyExecutor:
                 PositionModel.quantity > 0,
             ).first()
             return pos.quantity if pos else 0
+=======
+    @staticmethod
+    def _already_acted_today(db: Session, strat: Strategy, symbol: str, side: str) -> bool:
+        """True if this strategy already traded or has open order for symbol+side today."""
+        from app.models.order import Order
 
-        # Buy: use a portion of strategy capital
+        day0 = trading_day_start()
+        mode = strat.mode or "paper"
+        traded = db.query(Trade).filter(
+            Trade.user_id == strat.user_id,
+            Trade.strategy_id == strat.id,
+            Trade.symbol == symbol,
+            Trade.side == side,
+            Trade.trade_mode == mode,
+            Trade.trade_time >= day0,
+        ).first()
+        if traded:
+            return True
+        open_order = db.query(Order).filter(
+            Order.user_id == strat.user_id,
+            Order.strategy_id == strat.id,
+            Order.symbol == symbol,
+            Order.side == side,
+            Order.trade_mode == mode,
+            Order.status.in_(("pending", "submitted")),
+            Order.created_at >= day0,
+        ).first()
+        return open_order is not None
+
+    @staticmethod
+    def _has_open_position(db: Session, strat: Strategy, symbol: str) -> bool:
+        mode = strat.mode or "paper"
+        pos = db.query(PositionModel).filter(
+            PositionModel.user_id == strat.user_id,
+            PositionModel.strategy_id == strat.id,
+            PositionModel.symbol == symbol,
+            PositionModel.trade_mode == mode,
+            PositionModel.quantity > 0,
+        ).first()
+        return pos is not None
+
+    def _calc_quantity(
+        self,
+        db: Session,
+        strat: Strategy,
+        price: float,
+        side: str,
+        symbol: str = "",
+        price_history=None,
+    ) -> float:
+        """Calculate order quantity with T+1 sells and volatility targeting buys."""
+        from app.engine.trading_engine import trading_engine, LOT_SIZE
+        import math
+
+        mode = strat.mode or trading_engine.get_user_mode(db, strat.user_id) or "paper"
+
+        if side == "sell":
+            return trading_engine.get_available_quantity(
+                db, strat.user_id, symbol, strat.id, mode
+            )
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+
         if strat.strategy_type == "dca":
-            fixed_amount = float(strat.parameters.get("fixed_amount", 1000))
-            return fixed_amount / price if price > 0 else 0
+            fixed_amount = float((strat.parameters or {}).get("fixed_amount", 1000))
+            raw = fixed_amount / price if price > 0 else 0
+            return trading_engine.normalize_quantity(raw, "buy")
 
+<<<<<<< HEAD
         # Default: use 20% of remaining cash per signal
         # Use SQL aggregation instead of loading all trades into memory
         from app.models.trade import Trade
@@ -408,6 +641,34 @@ class StrategyExecutor:
         cash = user.initial_cash - total_bought + total_sold
         buy_amount = cash * 0.2
         return buy_amount / price if price > 0 else 0
+=======
+        cash = max(trading_engine.get_cash_balance(db, strat.user_id, mode), 0.0)
+        params = strat.parameters or {}
+        target_vol = float(params.get("target_volatility", 0.15))  # annualized
+        max_pct = float(params.get("max_position_pct", 0.30))  # of cash
+        lookback = int(params.get("vol_lookback", 20))
+
+        # Volatility targeting: size ∝ target_vol / realized_vol
+        position_pct = 0.20  # fallback
+        if price_history is not None and len(price_history) >= max(lookback + 1, 5):
+            try:
+                closes = price_history["close"].astype(float)
+                rets = closes.pct_change().dropna().tail(lookback)
+                daily_vol = float(rets.std())
+                if daily_vol > 1e-8:
+                    ann_vol = daily_vol * math.sqrt(252)
+                    position_pct = target_vol / ann_vol
+            except Exception:
+                pass
+
+        position_pct = max(0.05, min(position_pct, max_pct))
+        buy_amount = cash * position_pct
+        raw = buy_amount / price if price > 0 else 0
+        qty = trading_engine.normalize_quantity(raw, "buy")
+        if qty < LOT_SIZE and cash >= price * LOT_SIZE * 1.002:
+            qty = float(LOT_SIZE)
+        return qty
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
 
 strategy_executor = StrategyExecutor()

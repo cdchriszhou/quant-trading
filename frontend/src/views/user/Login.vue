@@ -15,9 +15,10 @@
         <el-form-item style="margin-top: 8px">
           <el-button type="primary" style="width: 100%; height: 42px; font-weight: 700; font-size: 15px; letter-spacing: 2px" :loading="loading" @click="handleLogin">登 录</el-button>
         </el-form-item>
-        <div style="text-align: center">
+        <div v-if="allowRegister" style="text-align: center">
           <el-button text type="primary" @click="handleRegister">还没有账号？立即注册</el-button>
         </div>
+        <div v-else style="text-align: center; font-size: 12px; color: #9ca3af">自助注册已关闭，请联系管理员开户</div>
       </el-form>
     </el-card>
 
@@ -42,12 +43,13 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { User, Lock } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { authApi } from '@/api/auth'
 import { ElMessage } from 'element-plus'
+import axios from 'axios'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -56,6 +58,7 @@ const regFormRef = ref(null)
 const loading = ref(false)
 const regLoading = ref(false)
 const showRegister = ref(false)
+const allowRegister = ref(true)
 
 const form = reactive({ username: '', password: '' })
 const regForm = reactive({ username: '', password: '', confirmPassword: '' })
@@ -111,4 +114,13 @@ async function handleRegisterSubmit() {
     regLoading.value = false
   }
 }
+
+onMounted(async () => {
+  try {
+    const res = await axios.get('/api/health')
+    allowRegister.value = res.data?.allow_register === true
+  } catch {
+    allowRegister.value = false
+  }
+})
 </script>

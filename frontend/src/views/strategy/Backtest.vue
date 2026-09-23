@@ -4,9 +4,35 @@
       <el-col :xs="24" :md="8">
         <el-card shadow="never">
           <template #header><span style="font-weight: bold">回测配置</span></template>
-          <el-form label-width="100px" size="small">
+          <el-alert
+            v-if="fromRecommend"
+            type="info"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 12px"
+            title="来自短期持仓推荐"
+            description="回测完成后可从侧栏返回「资金匹配推荐」，推荐列表会保留，无需重新生成。"
+          />
+          <el-form label-width="100px" size="small" @submit.prevent>
+            <el-form-item label="载入策略">
+              <el-select
+                v-model="selectedStrategyId"
+                clearable
+                filterable
+                style="width: 100%"
+                placeholder="从已有策略载入参数"
+                @change="onLoadStrategy"
+              >
+                <el-option
+                  v-for="s in savedStrategies"
+                  :key="s.id"
+                  :label="`${s.name} (${typeLabel(s.strategy_type)})`"
+                  :value="s.id"
+                />
+              </el-select>
+            </el-form-item>
             <el-form-item label="策略类型">
-              <el-select v-model="form.strategy_type" style="width: 100%">
+              <el-select v-model="form.strategy_type" style="width: 100%" @change="onTypeChange">
                 <el-option v-for="t in types" :key="t.type" :label="t.name" :value="t.type" />
               </el-select>
             </el-form-item>
@@ -16,13 +42,16 @@
               </el-select>
             </el-form-item>
             <el-form-item label="开始日期">
-              <el-date-picker v-model="form.start_date" type="date" style="width: 100%" value-format="YYYY-MM-DD" />
+              <el-date-picker v-model="form.start_date" type="date" style="width: 100%" value-format="YYYY-MM-DD" :disabled-date="disableFutureDate" />
+              <div style="font-size: 11px; color: #909399; margin-top: 2px">默认近 2 年（覆盖 MA60 预热 + 一轮涨跌）</div>
             </el-form-item>
             <el-form-item label="结束日期">
-              <el-date-picker v-model="form.end_date" type="date" style="width: 100%" value-format="YYYY-MM-DD" />
+              <el-date-picker v-model="form.end_date" type="date" style="width: 100%" value-format="YYYY-MM-DD" :disabled-date="disableFutureDate" />
+              <div style="font-size: 11px; color: #909399; margin-top: 2px">默认今天；不能晚于今天，无行情日以最近交易日为准</div>
             </el-form-item>
             <el-form-item label="初始资金">
               <el-input-number v-model="form.initial_capital" :min="10000" :step="10000" style="width: 180px" />
+              <div style="font-size: 11px; color: #909399; margin-top: 2px">默认同账户初始资金</div>
             </el-form-item>
             <el-divider content-position="left">筛选条件</el-divider>
             <el-form-item label="大盘环境过滤">
@@ -31,7 +60,7 @@
             </el-form-item>
             <el-form-item label="板块筛选">
               <el-switch v-model="form.enable_sector_filter" />
-              <span style="margin-left: 8px; font-size: 11px; color: #909399">只交易Top10板块内标的</span>
+              <span style="margin-left: 8px; font-size: 11px; color: #909399">暂无历史排名，开启也会跳过（防前视）</span>
             </el-form-item>
             <el-form-item label="对比模式">
               <el-switch v-model="form.comparison_mode" />
@@ -39,10 +68,16 @@
             </el-form-item>
             <el-divider />
             <el-form-item v-for="(val, key) in form.parameters" :key="key" :label="paramLabel(key)">
-              <el-input-number v-model="form.parameters[key]" :min="0.1" :step="getParamStep(key)" :precision="getParamPrecision(key)" style="width: 180px" />
+              <el-input-number
+                v-model="form.parameters[key]"
+                :min="getParamMin(key)"
+                :step="getParamStep(key)"
+                :precision="getParamPrecision(key)"
+                style="width: 180px"
+              />
             </el-form-item>
             <el-form-item>
-              <el-button type="primary" @click="runBacktest" :loading="running" style="width: 100%">开始回测</el-button>
+              <el-button type="primary" native-type="button" @click="runBacktest" :loading="running" style="width: 100%">开始回测</el-button>
             </el-form-item>
           </el-form>
         </el-card>
@@ -64,7 +99,7 @@
         <!-- Comparison Results (Core 4) -->
         <el-card shadow="never" v-if="comparisonResult" style="margin-bottom: 16px">
           <template #header>
-            <span style="font-weight: bold">📊 筛选效果对比</span>
+            <span style="font-weight: bold">筛选效果对比</span>
           </template>
           <el-alert type="info" :closable="false" style="margin-bottom: 12px">
             {{ comparisonResult.summary }}
@@ -114,12 +149,11 @@
                 <el-tag size="small" type="info">{{ typeLabel(row.strategy_type) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="标的" width="110">
+            <el-table-column label="标的" min-width="130">
               <template #default="{ row }">
                 <template v-if="row.symbols && row.symbols.length">
-                  <div v-for="s in row.symbols" :key="s" style="font-size: 11px">
-                    {{ s.replace('.SZ','').replace('.SH','') }}
-                    <span style="color: #9ca3af; font-size: 10px">{{ getStockName(s) }}</span>
+                  <div v-for="s in row.symbols" :key="s" style="margin-bottom: 2px">
+                    <StockTicker :symbol="s" :name="getStockName(s)" />
                   </div>
                 </template>
                 <span v-else style="color: #9ca3af">--</span>
@@ -133,7 +167,9 @@
               </template>
             </el-table-column>
             <el-table-column prop="sharpe_ratio" label="夏普比" width="80" />
-            <el-table-column prop="max_drawdown_pct" label="最大回撤" width="90" />
+            <el-table-column prop="max_drawdown_pct" label="最大回撤" width="90">
+              <template #default="{ row }">{{ row.max_drawdown_pct?.toFixed(2) }}%</template>
+            </el-table-column>
             <el-table-column prop="total_trades" label="交易" width="60" />
             <el-table-column prop="win_rate" label="胜率" width="70">
               <template #default="{ row }">{{ row.win_rate?.toFixed(1) }}%</template>
@@ -152,21 +188,33 @@
 </template>
 
 <script setup>
+<<<<<<< HEAD
 import { ref, reactive, onMounted, nextTick, watch } from 'vue'
+=======
+import { ref, reactive, onMounted, nextTick, computed } from 'vue'
+import { useRoute } from 'vue-router'
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 import { strategyApi } from '@/api/strategy'
 import { backtestApi } from '@/api/backtest'
 import { marketApi } from '@/api/market'
 import { ElMessage } from 'element-plus'
 import { paramLabel } from '@/utils/paramLabel'
-import { getStockName } from '@/utils/stockNames'
+import { getStockName, ensureStockNames } from '@/utils/stockNames'
+import { strategyTypeLabel } from '@/utils/labels'
+import { useAccountStore } from '@/stores/account'
 import * as echarts from 'echarts'
 
-const typeMap = { ma: '均线', macd: 'MACD', bollinger: '布林带', grid: '网格', dca: '定投', dragon_pullback: '龙回头', trend_following: '趋势跟踪', right_side_entry: '右侧入场' }
-function typeLabel(t) { return typeMap[t] || t }
+const route = useRoute()
+const accountStore = useAccountStore()
+function typeLabel(t) { return strategyTypeLabel(t) }
+
+const fromRecommend = computed(() => String(route.query.from || '') === 'recommend')
 
 const types = ref([])
 const symbols = ref([])
 const symLoading = ref(false)
+const savedStrategies = ref([])
+const selectedStrategyId = ref(null)
 
 async function remoteSearch(query) {
   if (!query || query.trim().length < 2) {
@@ -184,28 +232,55 @@ const running = ref(false)
 const chartRef = ref(null)
 let chart = null
 
+async function hydrateBacktestNames(list) {
+  const codes = []
+  for (const row of list || []) {
+    for (const s of row.symbols || []) codes.push(s)
+  }
+  if (codes.length) await ensureStockNames(codes)
+}
+
+async function setBacktests(list) {
+  backtests.value = list || []
+  await hydrateBacktestNames(backtests.value)
+}
+
+function formatLocalDate(d) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+/** Default: ~2 years — enough for MA60 warmup and one market cycle. */
 function defaultStartDate() {
   const d = new Date()
-  d.setFullYear(d.getFullYear() - 1)
-  return d.toISOString().slice(0, 10)
+  d.setFullYear(d.getFullYear() - 2)
+  return formatLocalDate(d)
 }
 function defaultEndDate() {
-  return new Date().toISOString().slice(0, 10)
+  return formatLocalDate(new Date())
+}
+function disableFutureDate(d) {
+  const today = new Date()
+  today.setHours(23, 59, 59, 999)
+  return d.getTime() > today.getTime()
 }
 
 const form = reactive({
   strategy_type: 'right_side_entry',
+  strategy_id: null,
   symbol: '000001.SZ',
   start_date: defaultStartDate(),
   end_date: defaultEndDate(),
-  initial_capital: 100000,
-  parameters: { ma_short: 5, ma_medium: 20, ma_long: 60, pullback_near_ma_pct: 2.0, vol_contraction_ratio: 0.5, vol_expansion_ratio: 1.5, stop_loss_ma_break_pct: 2.0, hard_stop_pct: 7.0 },
+  initial_capital: 1000000,
+  parameters: {},
   enable_env_filter: true,
-  enable_sector_filter: true,
+  enable_sector_filter: false,
   comparison_mode: true,
 })
 
 const metrics = ref([])
+<<<<<<< HEAD
 
 // When strategy type changes, fetch default parameters for that type
 watch(() => form.strategy_type, async (newType) => {
@@ -220,12 +295,67 @@ watch(() => form.strategy_type, async (newType) => {
   }
 })
 
+=======
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 const comparisonResult = ref(null)
+
+async function onTypeChange(type) {
+  try {
+    const res = await strategyApi.getDefaultParams(type)
+    form.parameters = { ...(res.params || {}) }
+  } catch {
+    form.parameters = {}
+  }
+}
+
+async function onLoadStrategy(id) {
+  if (!id) {
+    form.strategy_id = null
+    return
+  }
+  let s = savedStrategies.value.find((x) => x.id === id || x.id === Number(id))
+  if (!s) {
+    try {
+      const res = await strategyApi.get(id)
+      s = res.data || res
+      if (s?.id && !savedStrategies.value.some((x) => x.id === s.id)) {
+        savedStrategies.value = [s, ...savedStrategies.value]
+      }
+    } catch {
+      ElMessage.warning('无法载入该策略，请手动选择')
+      return
+    }
+  }
+  if (!s) return
+  form.strategy_id = s.id
+  form.strategy_type = s.strategy_type
+  form.initial_capital = s.initial_capital || accountStore.defaultCapital
+  form.parameters = { ...(s.parameters || {}) }
+  if (s.symbols?.length) {
+    form.symbol = s.symbols[0]
+    const cn = getStockName(form.symbol) || form.symbol
+    if (!symbols.value.find((x) => x.code === form.symbol)) {
+      symbols.value = [{ code: form.symbol, name: cn }, ...symbols.value]
+    } else {
+      const hit = symbols.value.find((x) => x.code === form.symbol)
+      if (hit && (!hit.name || hit.name === hit.code) && cn !== form.symbol) {
+        hit.name = cn
+      }
+    }
+    ensureStockNames([form.symbol]).then(() => {
+      const n = getStockName(form.symbol)
+      const hit = symbols.value.find((x) => x.code === form.symbol)
+      if (hit && n) hit.name = n
+    })
+  }
+  ElMessage.success(`已载入策略：${s.name}`)
+}
 
 async function runBacktest() {
   running.value = true
   try {
     const payload = {
+      strategy_id: form.strategy_id || undefined,
       strategy_type: form.strategy_type,
       parameters: form.parameters,
       symbols: [form.symbol],
@@ -236,15 +366,24 @@ async function runBacktest() {
       enable_sector_filter: form.enable_sector_filter,
       comparison_mode: form.comparison_mode,
     }
+<<<<<<< HEAD
     const res = await backtestApi.run(payload)
     // Axios interceptor unwraps response.data → res is top-level API envelope
     const filtered = res.filtered_result || res.data || res
     result.value = filtered
     comparisonResult.value = res.comparison ?? null
+=======
+    const res = await backtestApi.run(payload, { timeout: 120000 })
+    // axios interceptor already unwraps HTTP body:
+    // { data: savedRow, filtered_result, comparison?, date_notes? }
+    const filtered = res.filtered_result || res.data || res
+    result.value = filtered
+    comparisonResult.value = res.comparison || null
+>>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
     const d = filtered
     metrics.value = [
-      { label: '累计收益率', value: `${d.total_return_pct?.toFixed(2)}%`, color: d.total_return_pct >= 0 ? '#67c23a' : '#f56c6c' },
+      { label: '累计收益率', value: `${d.total_return_pct?.toFixed(2)}%`, color: d.total_return_pct >= 0 ? '#ef4444' : '#10b981' },
       { label: '年化收益', value: `${d.annual_return?.toFixed(2)}%`, color: '#409EFF' },
       { label: '最大回撤', value: `${d.max_drawdown_pct?.toFixed(2)}%`, color: '#e6a23c' },
       { label: '夏普比率', value: d.sharpe_ratio?.toFixed(2) },
@@ -254,18 +393,30 @@ async function runBacktest() {
       { label: '连续亏损', value: d.consecutive_losses || 0, color: '#f56c6c' },
     ]
 
-    ElMessage.success(res.comparison ? '回测完成 — 查看筛选对比效果' : '回测完成')
+    const skipNote = filtered?.filter_info?.sector_filter_skipped_reason
+    const dateNotes = res.date_notes || filtered?.filter_info?.date_notes || []
+    const dataEnd = filtered?.filter_info?.data_end
+    if (dateNotes.length) {
+      ElMessage.warning(dateNotes[0])
+    } else if (dataEnd && form.end_date && dataEnd < form.end_date) {
+      ElMessage.warning(`行情最新到 ${dataEnd}，与所选结束日区间内无新增K线，结果可能相同`)
+    } else {
+      ElMessage.success(skipNote || (res.comparison ? '回测完成 — 查看筛选对比效果' : '回测完成'))
+    }
 
     await nextTick()
     renderChart(d.equity_curve || [])
+    const bRes = await backtestApi.list()
+    await setBacktests(bRes.data || [])
   } catch (e) {
-    ElMessage.error('回测失败')
+    ElMessage.error(e?.response?.data?.detail || '回测失败')
   } finally {
     running.value = false
   }
 }
 
 function renderChart(equityCurve) {
+  if (!chartRef.value) return
   if (chart) chart.dispose()
   chart = echarts.init(chartRef.value)
   chart.setOption({
@@ -281,13 +432,23 @@ function renderChart(equityCurve) {
   })
 }
 
+function getParamMin(key) {
+  if (key === 'min_daily_amount' || key === 'fixed_amount' || key === 'base_price') return 0
+  const floatKeys = ['pullback_near_ma_pct', 'vol_contraction_ratio', 'vol_expansion_ratio', 'stop_loss_ma_break_pct', 'hard_stop_pct', 'ma_slope_flat_threshold', 'target_volatility', 'max_position_pct', 'grid_spacing_pct']
+  if (floatKeys.includes(key)) return 0
+  return 1
+}
+
 function getParamStep(key) {
-  const floatKeys = ['pullback_near_ma_pct', 'vol_contraction_ratio', 'vol_expansion_ratio', 'stop_loss_ma_break_pct', 'hard_stop_pct', 'ma_slope_flat_threshold']
+  if (key === 'min_daily_amount') return 1000000
+  if (key === 'fixed_amount') return 100
+  const floatKeys = ['pullback_near_ma_pct', 'vol_contraction_ratio', 'vol_expansion_ratio', 'stop_loss_ma_break_pct', 'hard_stop_pct', 'ma_slope_flat_threshold', 'target_volatility', 'max_position_pct', 'grid_spacing_pct']
   return floatKeys.includes(key) ? 0.1 : 1
 }
 
 function getParamPrecision(key) {
-  const floatKeys = ['pullback_near_ma_pct', 'vol_contraction_ratio', 'vol_expansion_ratio', 'stop_loss_ma_break_pct', 'hard_stop_pct', 'ma_slope_flat_threshold']
+  if (key === 'min_daily_amount' || key === 'fixed_amount') return 0
+  const floatKeys = ['pullback_near_ma_pct', 'vol_contraction_ratio', 'vol_expansion_ratio', 'stop_loss_ma_break_pct', 'hard_stop_pct', 'ma_slope_flat_threshold', 'target_volatility', 'max_position_pct', 'grid_spacing_pct']
   return floatKeys.includes(key) ? 2 : 0
 }
 
@@ -295,7 +456,7 @@ function viewBacktest(row) {
   result.value = row
   comparisonResult.value = null
   metrics.value = [
-    { label: '累计收益率', value: `${row.total_return_pct?.toFixed(2)}%`, color: row.total_return_pct >= 0 ? '#67c23a' : '#f56c6c' },
+    { label: '累计收益率', value: `${row.total_return_pct?.toFixed(2)}%`, color: row.total_return_pct >= 0 ? '#ef4444' : '#10b981' },
     { label: '年化收益', value: `${row.annual_return?.toFixed(2)}%`, color: '#409EFF' },
     { label: '最大回撤', value: `${row.max_drawdown_pct?.toFixed(2)}%`, color: '#e6a23c' },
     { label: '夏普比率', value: row.sharpe_ratio?.toFixed(2) },
@@ -307,14 +468,26 @@ function viewBacktest(row) {
 
 onMounted(async () => {
   try {
-    const [tRes, sRes, bRes] = await Promise.all([
+    const [, tRes, sRes, bRes, stRes] = await Promise.all([
+      accountStore.refresh(),
       strategyApi.getTypes(),
       marketApi.searchSymbols(),
       backtestApi.list(),
+      strategyApi.list(),
     ])
     types.value = tRes.data || []
     symbols.value = sRes.data || []
-    backtests.value = bRes.data || []
+    await setBacktests(bRes.data || [])
+    savedStrategies.value = stRes.data || []
+    form.initial_capital = accountStore.defaultCapital
+    await onTypeChange(form.strategy_type)
+
+    const qid = route.query.strategy_id
+    if (qid) {
+      const id = Number(qid)
+      selectedStrategyId.value = id
+      await onLoadStrategy(id)
+    }
   } catch (e) { console.error(e) }
 })
 </script>

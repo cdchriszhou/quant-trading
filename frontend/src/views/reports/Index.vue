@@ -38,8 +38,7 @@
         <el-table-column prop="trade_time" label="时间" width="160" />
         <el-table-column label="标的" width="130">
           <template #default="{ row }">
-            <div style="font-weight: 600; font-size: 12px">{{ row.symbol?.replace('.SZ','').replace('.SH','') }}</div>
-            <div style="color: #9ca3af; font-size: 11px">{{ getStockName(row.symbol) }}</div>
+            <StockTicker :symbol="row.symbol" :row="row" />
           </template>
         </el-table-column>
         <el-table-column prop="side" label="方向" width="60">
@@ -58,7 +57,9 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column prop="trade_mode" label="模式" width="60" />
+        <el-table-column label="模式" width="70">
+          <template #default="{ row }">{{ tradeModeLabel(row.trade_mode) }}</template>
+        </el-table-column>
       </el-table>
       </div>
       <el-empty v-else description="暂无交易记录" />
@@ -71,7 +72,8 @@ import { ref, computed, onMounted } from 'vue'
 import { reportsApi } from '@/api/reports'
 import { tradingApi } from '@/api/trading'
 import { ElMessage } from 'element-plus'
-import { getStockName } from '@/utils/stockNames'
+import { displayStockName, ensureStockNames } from '@/utils/stockNames'
+import { tradeModeLabel, sideLabel } from '@/utils/labels'
 
 const trades = ref([])
 const performance = ref(null)
@@ -110,6 +112,7 @@ async function load() {
       tradingApi.getAccount(),
     ])
     trades.value = tRes.data || []
+    await ensureStockNames(trades.value.map((t) => t.symbol))
     performance.value = pRes.data
     account.value = aRes.data
   } catch (e) { console.error(e) }
@@ -119,7 +122,7 @@ function exportTrades() {
   const csv = [
     ['时间', '标的', '方向', '价格', '数量', '金额', '手续费', '盈亏', '模式'].join(','),
     ...trades.value.map(t =>
-      [t.trade_time, t.symbol, t.side, t.price, t.quantity, t.amount, t.commission, t.pnl || '', t.trade_mode].join(',')
+      [t.trade_time, `${t.symbol}${t.symbol_name ? '(' + t.symbol_name + ')' : ''}`, sideLabel(t.side), t.price, t.quantity, t.amount, t.commission, t.pnl || '', tradeModeLabel(t.trade_mode)].join(',')
     ),
   ].join('\n')
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })

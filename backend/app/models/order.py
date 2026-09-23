@@ -26,11 +26,13 @@ class Order(Base):
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
     def to_dict(self):
+        from app.models.naming import resolve_symbol_name
         return {
             "id": self.id,
             "user_id": self.user_id,
             "strategy_id": self.strategy_id,
             "symbol": self.symbol,
+            "symbol_name": resolve_symbol_name(self.symbol),
             "order_type": self.order_type,
             "side": self.side,
             "price": self.price,
