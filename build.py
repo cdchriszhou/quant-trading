@@ -40,13 +40,9 @@ def shell_scripts() -> dict[str, str]:
         "start.sh": """\
 #!/bin/bash
 # Quant Trading System - Production Start
-<<<<<<< HEAD
 # Usage: ./start.sh [--foreground]
 #   --foreground   Run in foreground (useful for local testing)
 set -e
-=======
-set -euo pipefail
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -91,7 +87,6 @@ if [ ! -x "$VENV_DIR/bin/python" ]; then
     python3 -m venv "$VENV_DIR"
 fi
 
-<<<<<<< HEAD
 # Install dependencies (bypass system proxy that may be down)
 echo "Installing Python dependencies..."
 cd "$SCRIPT_DIR/backend"
@@ -137,29 +132,6 @@ else
     echo ""
     echo "  Use ./stop.sh to stop the service."
 fi
-=======
-echo "Installing Python dependencies..."
-cd "$SCRIPT_DIR/backend"
-"$VENV_DIR/bin/pip" install --upgrade pip -q
-"$VENV_DIR/bin/pip" install -r requirements.txt -q
-
-echo "Starting Quant Trading System..."
-export STATIC_DIR="$SCRIPT_DIR/frontend"
-nohup "$VENV_DIR/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 >> "$LOG_FILE" 2>&1 &
-PID=$!
-echo "$PID" > "$PID_FILE"
-
-sleep 1
-if ! kill -0 "$PID" 2>/dev/null; then
-    echo "[ERROR] Process exited immediately. Check logs: $LOG_FILE"
-    rm -f "$PID_FILE"
-    exit 1
-fi
-
-echo "Started (PID: $PID)"
-echo "  App:  http://localhost:8000"
-echo "  Logs: $LOG_FILE"
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 """,
         "stop.sh": """\
 #!/bin/bash
@@ -380,7 +352,6 @@ rm -rf "$TMP_DIR"
 # 6. Deps + start
 echo
 echo "[6/6] Installing dependencies and starting..."
-<<<<<<< HEAD
 cd "$APP_DIR/backend"
 VENV_DIR="$APP_DIR/.venv"
 if [ ! -f "$VENV_DIR/bin/python" ]; then
@@ -393,8 +364,6 @@ echo "  Done."
 
 echo
 echo "Starting service..."
-=======
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 cd "$APP_DIR"
 chmod +x start.sh stop.sh rollback.sh 2>/dev/null || true
 bash start.sh
@@ -499,7 +468,6 @@ def main() -> None:
     print()
     print("[2/4] Building frontend...")
     frontend_dir = os.path.join(ROOT, "frontend")
-<<<<<<< HEAD
     # Build with proxy bypass (macOS system proxy may be set but app not running)
     build_env = os.environ.copy()
     for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]:
@@ -509,18 +477,11 @@ def main() -> None:
     if not os.path.isdir(os.path.join(frontend_dir, "node_modules")):
         subprocess.run("npm install", cwd=frontend_dir, shell=True, check=True, env=build_env)
     subprocess.run("npm run build", cwd=frontend_dir, shell=True, check=True, env=build_env)
-=======
-    node_modules = os.path.join(frontend_dir, "node_modules")
-    if not os.path.isdir(node_modules):
-        print("  npm install...")
-        subprocess.run("npm install", cwd=frontend_dir, shell=True, check=True)
-    subprocess.run("npm run build", cwd=frontend_dir, shell=True, check=True)
     frontend_dist = os.path.join(frontend_dir, "dist")
     if not os.path.isdir(frontend_dist) or not os.path.isfile(
         os.path.join(frontend_dist, "index.html")
     ):
         raise SystemExit("[ERROR] frontend/dist/index.html missing after build")
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     print("  Frontend built.")
 
     # ---- Package ------------------------------------------------

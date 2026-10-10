@@ -75,9 +75,6 @@ const showCancelCol = computed(() =>
   !filterStatus.value || filterStatus.value === 'pending' || filterStatus.value === 'submitted'
 )
 
-function formatCode(symbol) {
-  return (symbol || '').replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
-}
 function statusType(s) {
   return { pending: 'warning', submitted: 'primary', filled: 'success', cancelled: 'info', rejected: 'danger' }[s] || 'info'
 }

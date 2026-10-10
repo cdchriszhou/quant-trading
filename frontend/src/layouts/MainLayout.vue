@@ -3,8 +3,9 @@
     <!-- Desktop Sidebar -->
     <el-aside
       v-if="!isMobile"
+      class="app-aside"
       :width="isCollapse ? '64px' : '220px'"
-      style="background: #fff; border-right: 1px solid #e5e7eb; transition: width 0.3s; flex-shrink: 0; overflow-x: hidden; overflow-y: auto"
+      style="background: #fff; border-right: 1px solid #e5e7eb; transition: width 0.3s; flex-shrink: 0; overflow: visible; position: relative; z-index: 30"
     >
       <SidebarMenu :is-collapse="isCollapse" />
     </el-aside>
@@ -29,17 +30,22 @@
     </teleport>
 
     <el-container>
-      <el-header style="height: 48px; min-height: 48px; background: #fff; border-bottom: 1px solid #e5e7eb; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; flex-shrink: 0">
-        <div style="display: flex; align-items: center; gap: 8px">
-          <!-- Mobile hamburger -->
-          <el-icon v-if="isMobile" style="cursor: pointer; font-size: 22px; color: #374151" @click="drawerOpen = true">
-            <Menu />
-          </el-icon>
-          <!-- Desktop collapse toggle -->
-          <el-icon v-else style="cursor: pointer; font-size: 20px; color: #6b7280" @click="isCollapse = !isCollapse">
-            <Fold v-if="!isCollapse" /><Expand v-else />
-          </el-icon>
-          <el-breadcrumb separator="/" style="font-size: 13px">
+      <el-header class="app-header">
+        <div class="header-left">
+          <!-- Always clickable menu: drawer on narrow screens, collapse on desktop -->
+          <button
+            type="button"
+            class="header-menu-btn"
+            :title="isMobile ? '打开菜单' : (isCollapse ? '展开侧栏' : '收起侧栏')"
+            @click="onHeaderMenuClick"
+          >
+            <el-icon :size="20">
+              <Menu v-if="isMobile" />
+              <Expand v-else-if="isCollapse" />
+              <Fold v-else />
+            </el-icon>
+          </button>
+          <el-breadcrumb separator="/" class="header-crumb">
             <template v-if="route.path === '/dashboard'">
               <el-breadcrumb-item>仪表盘</el-breadcrumb-item>
             </template>
@@ -55,7 +61,7 @@
             </template>
           </el-breadcrumb>
         </div>
-        <div style="display: flex; align-items: center; gap: 10px">
+        <div class="header-right">
           <!-- Notification bell -->
           <el-popover
             placement="bottom-end"
@@ -78,7 +84,8 @@
                 <el-button v-if="unreadCount > 0" text size="small" @click="markAllRead">全部已读</el-button>
               </div>
               <div style="overflow-y: auto; flex: 1; min-height: 0">
-                <div v-if="notifications.length === 0" style="text-align: center; padding: 28px 0; color: #9ca3af">暂无通知</div>
+                <div v-if="notifListError" style="text-align: center; padding: 20px 8px; color: #f59e0b; font-size: 12px">{{ notifListError }}</div>
+                <div v-else-if="notifications.length === 0" style="text-align: center; padding: 28px 0; color: #9ca3af">暂无通知</div>
                 <div
                   v-for="n in notifications"
                   :key="n.id"
@@ -103,7 +110,7 @@
                 </div>
               </div>
               <div style="text-align: center; padding-top: 8px; border-top: 1px solid #e5e7eb; margin-top: 6px">
-                <el-button text size="small" @click="viewAllNotifications">查看全部</el-button>
+                <el-button text size="small" @click="viewAllNotifications">全部消息</el-button>
               </div>
             </div>
           </el-popover>
@@ -125,8 +132,14 @@
             {{ nowStr }}
           </span>
 
-          <span style="font-size: 10px; font-weight: 600; letter-spacing: 1px; padding: 2px 6px; border-radius: 3px; white-space: nowrap"
-                :style="wsConnected ? 'color:#00B4B4;background:rgba(0,180,180,0.1)' : 'color:#ef4444;background:rgba(239,68,68,0.08)'">
+          <span
+            style="font-size: 10px; font-weight: 600; letter-spacing: 1px; padding: 2px 6px; border-radius: 3px; white-space: nowrap"
+            :style="wsConnected
+              ? 'color:#00B4B4;background:rgba(0,180,180,0.1)'
+              : 'color:#ef4444;background:rgba(239,68,68,0.08);cursor:pointer'"
+            :title="wsConnected ? 'LIVE行情' : '已断开，点击重新连接'"
+            @click="!wsConnected && forceReconnectMarket()"
+          >
             {{ wsConnected ? 'LIVE行情' : 'OFFLINE' }}
           </span>
           <el-dropdown @command="handleCommand">
@@ -145,9 +158,15 @@
       </el-header>
       <el-main style="background: #f5f6f8; padding: 12px; overflow-y: auto; overflow-x: hidden">
         <router-view v-slot="{ Component, route: r }">
-          <keep-alive :include="['Recommend']">
-            <component :is="Component" :key="r.name" />
+          <!--
+            Do NOT wrap all routes in keep-alive: many views are Index.vue and share
+            the inferred name "Index", which makes keep-alive reuse the wrong page
+            (e.g. stay on 风险控制 after navigating to 数据报表). Only cache Recommend.
+          -->
+          <keep-alive>
+            <component :is="Component" v-if="r.name === 'Recommend'" :key="r.fullPath" />
           </keep-alive>
+          <component :is="Component" v-if="r.name !== 'Recommend'" :key="r.fullPath" />
         </router-view>
       </el-main>
     </el-container>
@@ -190,6 +209,12 @@ const drawerOpen = ref(false)
 const isMobile = ref(false)
 const wsConnected = ref(false)
 let ws = null
+let notifWs = null
+let _wsManualClose = false
+let marketReconnectTimer = null
+let notifReconnectTimer = null
+let marketBackoffMs = 2000
+let visibilityHandler = null
 
 // ── Live clock ──
 const nowStr = ref('')
@@ -211,7 +236,7 @@ function updateClock() {
 const notifications = ref([])
 const unreadCount = ref(0)
 const notifPopVisible = ref(false)
-let notifWs = null
+const notifListError = ref('')
 
 // ── Notification methods ──
 function formatTime(iso) {
@@ -228,11 +253,22 @@ function formatTime(iso) {
 }
 
 async function fetchNotifications() {
+  notifListError.value = ''
   try {
     const res = await notificationsApi.list({ page: 1, page_size: 20 })
-    notifications.value = res.items || []
-    unreadCount.value = res.unread_count || 0
-  } catch (e) { /* silent */ }
+    const items = res?.items ?? res?.data?.items ?? []
+    if (Array.isArray(items)) {
+      notifications.value = items
+    }
+    const uc = res?.unread_count ?? res?.data?.unread_count
+    if (uc != null) unreadCount.value = uc
+    if (unreadCount.value > 0 && (!items || !items.length)) {
+      notifListError.value = '有未读消息但列表为空，请重启后端后刷新'
+    }
+  } catch (e) {
+    notifListError.value = '消息列表加载失败，请重启后端服务后再试'
+    console.warn('[Notify] list failed', e?.response?.data || e?.message || e)
+  }
 }
 
 async function fetchUnreadCount() {
@@ -267,12 +303,55 @@ async function markAllRead() {
 
 function viewAllNotifications() {
   notifPopVisible.value = false
-  // Could navigate to a dedicated page; for now just re-open
+  router.push('/notifications')
+}
+
+function clearMarketReconnectTimer() {
+  if (marketReconnectTimer) {
+    clearTimeout(marketReconnectTimer)
+    marketReconnectTimer = null
+  }
+}
+
+function clearNotifReconnectTimer() {
+  if (notifReconnectTimer) {
+    clearTimeout(notifReconnectTimer)
+    notifReconnectTimer = null
+  }
+}
+
+function scheduleMarketReconnect() {
+  if (_wsManualClose || !userStore.isLoggedIn) return
+  if (typeof document !== 'undefined' && document.hidden) return
+  clearMarketReconnectTimer()
+  const delay = marketBackoffMs
+  marketReconnectTimer = setTimeout(() => {
+    marketReconnectTimer = null
+    if (_wsManualClose || !userStore.isLoggedIn) return
+    if (typeof document !== 'undefined' && document.hidden) return
+    connectWebSocket()
+  }, delay)
+  marketBackoffMs = Math.min(marketBackoffMs * 2, 30000)
+}
+
+function forceReconnectMarket() {
+  if (_wsManualClose || !userStore.isLoggedIn) return
+  clearMarketReconnectTimer()
+  marketBackoffMs = 2000
+  try {
+    if (ws) {
+      ws.onclose = null
+      ws.close()
+    }
+  } catch (e) { /* ignore */ }
+  ws = null
+  connectWebSocket()
 }
 
 function connectNotifWebSocket() {
   const token = localStorage.getItem('token')
-  if (!token) return
+  if (!token || _wsManualClose) return
+  clearNotifReconnectTimer()
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
   try {
@@ -281,10 +360,8 @@ function connectNotifWebSocket() {
       try {
         const msg = JSON.parse(event.data)
         if (msg.type === 'notification') {
-          // Prepend new notification to list
           notifications.value.unshift(msg.data)
           unreadCount.value++
-          // Trim to max 50 in memory
           if (notifications.value.length > 50) {
             notifications.value = notifications.value.slice(0, 50)
           }
@@ -292,18 +369,36 @@ function connectNotifWebSocket() {
       } catch (e) { /* ignore malformed */ }
     }
     notifWs.onclose = () => {
-      // Reconnect after 30s
-      setTimeout(() => { if (userStore.isLoggedIn) connectNotifWebSocket() }, 30000)
+      if (_wsManualClose || !userStore.isLoggedIn) return
+      if (typeof document !== 'undefined' && document.hidden) return
+      clearNotifReconnectTimer()
+      notifReconnectTimer = setTimeout(() => {
+        notifReconnectTimer = null
+        if (userStore.isLoggedIn && !_wsManualClose) connectNotifWebSocket()
+      }, 30000)
     }
     notifWs.onerror = () => { /* silent */ }
   } catch (e) { /* WebSocket not supported */ }
 }
 
 // ── Lifecycle ──
-function checkMobile() {
-  isMobile.value = window.innerWidth < 768
+function onHeaderMenuClick() {
   if (isMobile.value) {
+    drawerOpen.value = true
+    return
+  }
+  isCollapse.value = !isCollapse.value
+}
+
+function checkMobile() {
+  const mobile = window.innerWidth < 768
+  const wasMobile = isMobile.value
+  isMobile.value = mobile
+  if (mobile) {
     isCollapse.value = true
+    if (!wasMobile) drawerOpen.value = false
+  } else if (wasMobile) {
+    isCollapse.value = false
     drawerOpen.value = false
   }
 }
@@ -312,27 +407,73 @@ const activeMenu = computed(() => route.path)
 
 function handleCommand(command) {
   if (command === 'logout') {
+    _wsManualClose = true
+    clearMarketReconnectTimer()
+    clearNotifReconnectTimer()
     userStore.logout()
-    if (ws) ws.close()
-    if (notifWs) notifWs.close()
+    if (ws) { try { ws.close() } catch (e) { /* ignore */ } }
+    if (notifWs) { try { notifWs.close() } catch (e) { /* ignore */ } }
+    ws = null
+    notifWs = null
     router.push('/login')
   }
 }
 
 function connectWebSocket() {
+  if (_wsManualClose) return
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host = window.location.host
   const token = localStorage.getItem('token') || ''
   const q = token ? `?token=${encodeURIComponent(token)}` : ''
-  ws = new WebSocket(`${protocol}//${host}/ws/market${q}`)
-  ws.onopen = () => { wsConnected.value = true }
-  ws.onclose = () => { wsConnected.value = false }
-  ws.onerror = () => { wsConnected.value = false }
+  try {
+    if (ws) {
+      ws.onclose = null
+      try { ws.close() } catch (e) { /* ignore */ }
+    }
+    ws = new WebSocket(`${protocol}//${host}/ws/market${q}`)
+    ws.onopen = () => {
+      wsConnected.value = true
+      marketBackoffMs = 2000
+      clearMarketReconnectTimer()
+    }
+    ws.onclose = () => {
+      wsConnected.value = false
+      scheduleMarketReconnect()
+    }
+    ws.onerror = () => {
+      wsConnected.value = false
+    }
+  } catch (e) {
+    wsConnected.value = false
+    scheduleMarketReconnect()
+  }
+}
+
+function onVisibilityChange() {
+  if (typeof document === 'undefined') return
+  if (document.hidden) {
+    clearMarketReconnectTimer()
+    clearNotifReconnectTimer()
+    return
+  }
+  // Resume: reconnect if sockets are down
+  if (!_wsManualClose && userStore.isLoggedIn) {
+    if (!wsConnected.value) {
+      marketBackoffMs = 2000
+      forceReconnectMarket()
+    }
+    if (!notifWs || notifWs.readyState === WebSocket.CLOSED || notifWs.readyState === WebSocket.CLOSING) {
+      connectNotifWebSocket()
+    }
+  }
 }
 
 onMounted(() => {
+  _wsManualClose = false
   checkMobile()
   window.addEventListener('resize', checkMobile)
+  visibilityHandler = onVisibilityChange
+  document.addEventListener('visibilitychange', visibilityHandler)
   connectWebSocket()
   connectNotifWebSocket()
   fetchUnreadCount()
@@ -342,9 +483,78 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  _wsManualClose = true
   window.removeEventListener('resize', checkMobile)
-  if (ws) ws.close()
-  if (notifWs) notifWs.close()
+  if (visibilityHandler) {
+    document.removeEventListener('visibilitychange', visibilityHandler)
+    visibilityHandler = null
+  }
+  clearMarketReconnectTimer()
+  clearNotifReconnectTimer()
+  if (ws) { try { ws.close() } catch (e) { /* ignore */ } }
+  if (notifWs) { try { notifWs.close() } catch (e) { /* ignore */ } }
+  ws = null
+  notifWs = null
   if (clockTimer) clearInterval(clockTimer)
 })
 </script>
+
+<style scoped>
+.app-header {
+  height: 48px;
+  min-height: 48px;
+  background: #fff;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  flex-shrink: 0;
+  gap: 8px;
+  overflow: hidden;
+}
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.header-menu-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: #374151;
+  cursor: pointer;
+  border-radius: 6px;
+  position: relative;
+  z-index: 5;
+}
+.header-menu-btn:hover {
+  background: #f3f4f6;
+}
+.header-crumb {
+  font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+@media (max-width: 760px) {
+  .header-right :deep(.el-select) {
+    width: 108px !important;
+  }
+  .header-right > span {
+    display: none;
+  }
+}
+</style>

@@ -93,20 +93,15 @@ class Settings(BaseSettings):
     PULLBACK_NEAR_MA_PCT: float = 2.0  # 回踩接近均线的容忍度(%)
 
     # Trading
-<<<<<<< HEAD
-    TRADING_MODE: str = "paper"
-    BROKER_TYPE: str = "paper"  # "paper", "qmt", "xtp", "ptrade", "ctp", "custom"
-=======
     TRADING_MODE: str = "paper"  # default account mode for new sessions
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     DEFAULT_CASH: float = 1000000.0
     # A-share fee schedule (真实费率)
     COMMISSION_RATE: float = 0.00025      # 佣金 万2.5
     MIN_COMMISSION: float = 5.0           # 佣金最低 5 元
     STAMP_DUTY_RATE: float = 0.0005       # 印花税 卖出 0.05%
     TRANSFER_FEE_RATE: float = 0.00001    # 过户费 双向 0.001%
-    # Live broker (MiniQMT)
-    BROKER_TYPE: str = "qmt"              # live broker backend
+    # Live broker (MiniQMT) — default paper; set to qmt/xtp/... for live
+    BROKER_TYPE: str = "paper"            # "paper", "qmt", "xtp", "ptrade", "ctp", "custom"
     ALLOW_LIVE_TRADING: bool = False      # safety switch — must enable explicitly
     QMT_MINI_PATH: str = ""               # e.g. D:/国金证券QMT交易端/userdata_mini
     QMT_ACCOUNT_ID: str = ""              # 资金账号

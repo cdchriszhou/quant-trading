@@ -76,14 +76,20 @@
               <span v-if="klineError" style="color: #f59e0b; font-size: 12px">数据加载失败，请检查网络</span>
             </div>
           </template>
-          <div v-if="klineError" style="height: 350px; display: flex; align-items: center; justify-content: center; color: #909399">
-            <div style="text-align: center">
-              <el-icon :size="40" style="color: #e5e7eb"><WarningFilled /></el-icon>
-              <p style="margin-top: 12px">K线数据暂不可用</p>
-              <p style="font-size: 12px; color: #c0c4cc">请确认后端服务及外部行情API连通性</p>
+          <div style="height: 350px; width: 100%; position: relative">
+            <div
+              v-if="klineError"
+              style="position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; color: #909399; background: #fff"
+            >
+              <div style="text-align: center">
+                <el-icon :size="40" style="color: #e5e7eb"><WarningFilled /></el-icon>
+                <p style="margin-top: 12px">K线数据暂不可用</p>
+                <p style="font-size: 12px; color: #c0c4cc">请确认后端服务及外部行情API连通性</p>
+                <el-button type="primary" link size="small" style="margin-top: 8px" @click="loadData">重试</el-button>
+              </div>
             </div>
+            <div ref="klineChartRef" style="height: 100%; width: 100%"></div>
           </div>
-          <div v-else ref="klineChartRef" style="height: 350px; width: 100%"></div>
         </el-card>
       </el-col>
       <el-col :xs="24" :md="8">
@@ -373,13 +379,62 @@ function selectSymbol(symbol) {
 function onSearchChange(val) {
   if (!val) {
     quote.value = null
-    if (klineChart) {
-      klineChart.dispose()
-      klineChart = null
-    }
+    disposeKline()
     return
   }
   loadData()
+}
+
+function disposeKline() {
+  if (klineChart) {
+    klineChart.dispose()
+    klineChart = null
+  }
+}
+
+async function loadData() {
+  if (!selectedSymbol.value) {
+    quote.value = null
+    disposeKline()
+    return
+  }
+  quoteError.value = false
+  try {
+    const res = await marketApi.getQuote(selectedSymbol.value)
+    quote.value = res
+  } catch (e) {
+    console.error('getQuote error:', e)
+    quoteError.value = true
+    quote.value = null
+  }
+
+  const sym = selectedSymbol.value
+  const period = selectedPeriod.value
+  klineError.value = false
+  await nextTick()
+  try {
+    const res = await marketApi.getKline(sym, period, 120)
+    // Ignore stale responses when user switched symbol/period mid-flight
+    if (selectedSymbol.value !== sym || selectedPeriod.value !== period) return
+    const kdata = res?.data || []
+    if (!Array.isArray(kdata) || !kdata.length) {
+      klineError.value = true
+      disposeKline()
+      return
+    }
+    klineError.value = false
+    await nextTick()
+    renderKline(kdata)
+    if (!klineChart) {
+      await nextTick()
+      renderKline(kdata)
+    }
+  } catch (e) {
+    if (selectedSymbol.value !== sym) return
+    console.error('getKline error:', e)
+    klineError.value = true
+    disposeKline()
+  }
 }
 
 async function loadHoldings({ preferKeepSelection = false } = {}) {
@@ -492,37 +547,6 @@ async function remoteSearch(query) {
   }
 }
 
-async function loadData() {
-  if (!selectedSymbol.value) {
-    quote.value = null
-    return
-  }
-  quoteError.value = false
-  try {
-    const res = await marketApi.getQuote(selectedSymbol.value)
-    quote.value = res
-  } catch (e) {
-    console.error('getQuote error:', e)
-    quoteError.value = true
-    quote.value = null
-  }
-
-  klineError.value = false
-  try {
-    const res = await marketApi.getKline(selectedSymbol.value, selectedPeriod.value, 120)
-    const kdata = res.data || []
-    await nextTick()
-    if (!kdata.length) {
-      klineError.value = true
-    } else {
-      renderKline(kdata)
-    }
-  } catch (e) {
-    console.error('getKline error:', e)
-    klineError.value = true
-  }
-}
-
 async function loadSectors() {
   sectorsError.value = false
   sectorsLoading.value = true
@@ -589,23 +613,17 @@ async function retryLoadSectorStocks() {
 }
 
 function renderKline(data) {
-<<<<<<< HEAD
-  if (!data.length) return
-=======
-  if (klineChart) klineChart.dispose()
   if (!data.length || !klineChartRef.value) return
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
-  // Reuse chart instance: only create once, update data with setOption
-  if (!klineChart) {
-    klineChart = echarts.init(klineChartRef.value)
-  }
+  disposeKline()
+  klineChart = echarts.init(klineChartRef.value)
 
   const dates = data.map(d => d.date)
   const vols = data.map(d => d.volume)
   const values = data.map(d => [d.open, d.close, d.low, d.high])
 
   klineChart.setOption({
+    animation: false,
     tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
     grid: [{ left: '10%', right: '8%', top: '10%', height: '60%' }, { left: '10%', right: '8%', top: '78%', height: '15%' }],
     xAxis: [{ type: 'category', data: dates, gridIndex: 0, axisLabel: { rotate: 45 } }, { type: 'category', data: dates, gridIndex: 1, show: false }],
@@ -620,7 +638,8 @@ function renderKline(data) {
         itemStyle: { color: 'rgba(64,158,255,0.3)' },
       },
     ],
-  })
+  }, true)
+  nextTick(() => klineChart?.resize())
 }
 
 onMounted(async () => {
@@ -670,7 +689,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (klineChart) klineChart.dispose()
+  disposeKline()
   if (quoteInterval) clearInterval(quoteInterval)
   if (holdingsInterval) clearInterval(holdingsInterval)
   if (sectorsInterval) clearInterval(sectorsInterval)

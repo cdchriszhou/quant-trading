@@ -63,25 +63,15 @@ def _migrate_schema():
 
 
 def init_db():
-<<<<<<< HEAD
-    """Create all tables and apply lightweight schema migrations."""
-=======
-    """Create all tables. Safe to call when DB is unavailable."""
+    """Create all tables and apply lightweight schema migrations. Safe to call when DB is unavailable."""
     # Ensure all models are registered on Base.metadata
-    import app.models  # noqa: F401
-
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     try:
         # Ensure all models are registered before create_all
         import app.models  # noqa: F401
 
         Base.metadata.create_all(bind=engine)
-<<<<<<< HEAD
         _migrate_schema()
-        # Verify connection
-=======
         _migrate_sqlite_columns()
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return True

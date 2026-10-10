@@ -83,6 +83,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'RiskControl' })
 import { ref, reactive, onMounted } from 'vue'
 import { riskApi } from '@/api/risk'
 import { ElMessage } from 'element-plus'

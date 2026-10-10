@@ -1,43 +1,6 @@
 <template>
   <div>
     <el-card shadow="never" style="margin-bottom: 16px">
-<<<<<<< HEAD
-      <template #header><span style="font-weight: bold">持仓查询</span></template>
-      <div v-if="positions.length" style="overflow-x: auto; -webkit-overflow-scrolling: touch">
-        <el-table :data="positions" stripe size="small">
-        <el-table-column prop="symbol" label="标的" width="160">
-          <template #default="{ row }">
-            {{ row.symbol }}<span v-if="row.name" style="color: #909399; margin-left: 4px">{{ row.name }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="quantity" label="持仓数量" width="100" />
-        <el-table-column prop="available_quantity" label="可用数量" width="100" />
-        <el-table-column prop="avg_cost" label="均价" width="90" />
-        <el-table-column prop="current_price" label="现价" width="90" />
-        <el-table-column prop="market_value" label="市值" width="100" />
-        <el-table-column prop="unrealized_pnl" label="浮动盈亏" width="110">
-          <template #default="{ row }">
-            <span :style="{ color: row.unrealized_pnl >= 0 ? '#ef4444' : '#10b981', fontWeight: 'bold' }">
-              {{ row.unrealized_pnl >= 0 ? '+' : '' }}{{ row.unrealized_pnl?.toFixed(2) }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="unrealized_pnl_pct" label="盈亏比例" width="100">
-          <template #default="{ row }">
-            <span :style="{ color: row.unrealized_pnl_pct >= 0 ? '#ef4444' : '#10b981' }">
-              {{ row.unrealized_pnl_pct >= 0 ? '+' : '' }}{{ row.unrealized_pnl_pct?.toFixed(2) }}%
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="realized_pnl" label="已实现盈亏" width="110">
-          <template #default="{ row }">
-            <span :style="{ color: row.realized_pnl >= 0 ? '#ef4444' : '#10b981' }">
-              {{ row.realized_pnl >= 0 ? '+' : '' }}{{ row.realized_pnl?.toFixed(2) }}
-            </span>
-          </template>
-        </el-table-column>
-      </el-table>
-=======
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px">
           <span style="font-weight: bold">持仓查询</span>
@@ -90,7 +53,24 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="已实现盈亏" width="100" align="right">
+          <el-table-column label="当日盈亏" width="100" align="right">
+            <template #header>
+              <el-tooltip content="相对昨收：(现价−昨收)×持仓数量" placement="top">
+                <span>当日盈亏</span>
+              </el-tooltip>
+            </template>
+            <template #default="{ row }">
+              <span :style="{ color: pnlColor(row.day_pnl), fontWeight: 'bold' }">
+                {{ fmtSigned(row.day_pnl) }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column label="卖出盈亏" width="100" align="right">
+            <template #header>
+              <el-tooltip content="本标的历史卖出已锁定盈亏；从未卖出则为 0（不是浮动盈亏）" placement="top">
+                <span>卖出盈亏</span>
+              </el-tooltip>
+            </template>
             <template #default="{ row }">
               <span :style="{ color: pnlColor(row.realized_pnl) }">
                 {{ fmtSigned(row.realized_pnl) }}
@@ -111,7 +91,6 @@
             </template>
           </el-table-column>
         </el-table>
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
       </div>
       <el-empty v-else description="暂无持仓" />
     </el-card>
@@ -155,10 +134,6 @@ const tradeDialogTitle = computed(() => {
   const name = p.symbol_name || p.symbol || ''
   return name ? `${side} · ${name}` : side
 })
-
-function formatCode(symbol) {
-  return (symbol || '').replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
-}
 
 function costPrice(row) {
   const v = Number(row?.avg_cost)

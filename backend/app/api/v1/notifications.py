@@ -41,8 +41,15 @@ def list_notifications(
         .all()
     )
 
+    out_items = []
+    for n in items:
+        raw = n.to_dict() if hasattr(n, "to_dict") else n
+        try:
+            out_items.append(NotificationOut.model_validate(raw))
+        except Exception:
+            continue
     return NotificationListOut(
-        items=[NotificationOut.model_validate(n) for n in items],
+        items=out_items,
         total=total,
         unread_count=unread_count,
     )

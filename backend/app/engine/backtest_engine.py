@@ -224,12 +224,24 @@ class BacktestEngine:
         return df_dict, filter_info
 
     def _get_bullish_dates(self, start_date: str, end_date: str) -> set:
-        """Compute which trading days are 'bullish' within a date range.
+        """Trading days permitted for new entries (short-horizon forecast).
 
-        Uses the MarketEnvEngine to simulate historical environment checks.
-        Since we can't check live historical env, we use a simplified approach:
-        look at the average price index trend to determine bullish periods.
+        Prefer market_forecast_engine (uptrend/top-risk composite). Fallback to
+        legacy MA20+volume rule if forecast series is empty.
         """
+        try:
+            from app.engine.market_forecast_engine import market_forecast_engine
+
+            series = market_forecast_engine.forecast_series(start_date, end_date)
+            if series is not None and len(series) > 0:
+                # Permit when outlook not deeply bearish (score>=40) — aligns with
+                # recommend "still pick in weak markets but tighter" philosophy:
+                # backtest filter uses mid threshold to prove timing value vs always-on.
+                ok = series[series["forecast_score"] >= 40]
+                return set(str(d)[:10] for d in ok["date"].tolist())
+        except Exception:
+            pass
+
         from app.engine.market_env_engine import market_env_engine
 
         df = market_env_engine.get_avg_price_kline(500)
@@ -242,7 +254,6 @@ class BacktestEngine:
         df["vol_ma20"] = df["volume"].rolling(window=20).mean()
         min_vol_ratio = 0.7
 
-        # Mark bullish days
         df["bullish"] = (
             (df["close"] > df["ma20"]) &
             (df["ma20_slope"] >= 0) &
@@ -378,24 +389,18 @@ class BacktestEngine:
         }
 
     def _simulate(self, df: pd.DataFrame, initial_capital: float,
-<<<<<<< HEAD
                   commission_rate: float, slippage: float,
                   risk_rules: list = None) -> tuple:
         """Simulate trading on signal data. Uses t+1 execution to avoid future leakage.
+
+        Aligns with live rules: 100-share lots, T+1 sell lock, A-share fee_engine.
+        ``commission_rate`` kept for API compatibility (fee_engine uses settings).
 
         Args:
             risk_rules: Optional list of risk rule dicts (from RiskRule model).
                        Each dict has: rule_type, operator, threshold.
                        Supported types: order_amount, position_pct, total_stocks,
                                        daily_loss, max_daily_loss, drawdown.
-        """
-=======
-                  commission_rate: float, slippage: float) -> tuple:
-        """Simulate trading on signal data. Uses t+1 execution to avoid future leakage.
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
-
-        Aligns with live rules: 100-share lots, T+1 sell lock, A-share fee_engine.
-        ``commission_rate`` kept for API compatibility (fee_engine uses settings).
         """
         from app.engine.fee_engine import fee_engine
         from app.engine.trading_engine import LOT_SIZE
@@ -407,13 +412,12 @@ class BacktestEngine:
         avg_entry_price = 0.0
         trades = []
         equity_curve = []
-        risk_violations = []  # track blocked trades
+        risk_violations = []
 
         prev_buy_signal = False
         prev_sell_signal = False
         last_date = None
 
-        # ── Risk state tracking ──
         daily_loss = 0.0
         current_date = ""
         total_stocks_held = 0
@@ -424,77 +428,11 @@ class BacktestEngine:
             sell_signal = bool(row.get("sell_signal", False))
             date_str = str(row.get("date", ""))
 
-<<<<<<< HEAD
-            # Reset daily loss when date changes
             if date_str != current_date:
                 daily_loss = 0.0
                 current_date = date_str
 
-            # Record equity at current price
-            equity = capital + position * price
-            equity_curve.append({"date": date_str, "equity": round(equity, 2)})
-
-            # Execute signals at t+1 price (avoid future leakage)
-            if prev_buy_signal and capital > 0:
-                buy_amount = capital * 0.95
-                shares = buy_amount / (price * (1 + slippage))
-                cost = shares * price * (1 + slippage)
-                commission = max(cost * commission_rate, 5.0)
-                total_cost = cost + commission
-
-                # ── Risk check before executing buy ──
-                risk_blocked = False
-                if risk_rules:
-                    portfolio_value = capital + position * price
-                    for rule in risk_rules:
-                        rtype = rule.get("rule_type", "")
-                        op = rule.get("operator", "lt")
-                        threshold = rule.get("threshold", 0)
-
-                        if rtype == "order_amount":
-                            val = total_cost
-                        elif rtype == "position_pct":
-                            new_pos_val = (position + shares) * price
-                            val = (new_pos_val / portfolio_value * 100) if portfolio_value > 0 else 0
-                        elif rtype == "total_stocks":
-                            val = total_stocks_held + 1
-                        elif rtype == "daily_loss":
-                            val = daily_loss
-                        elif rtype == "max_daily_loss":
-                            val = (daily_loss / portfolio_value * 100) if portfolio_value > 0 else 0
-                        elif rtype == "drawdown":
-                            val = ((avg_entry_price - price) / avg_entry_price * 100) if avg_entry_price > 0 and position > 0 else 0
-                        else:
-                            continue
-
-                        # Match risk_engine._check_rule: violation when rule does NOT pass
-                        passed = True
-                        if op == "gt":
-                            passed = val > threshold
-                        elif op == "lt":
-                            passed = val < threshold
-                        elif op == "ge":
-                            passed = val >= threshold
-                        elif op == "le":
-                            passed = val <= threshold
-                        elif op == "eq":
-                            passed = val == threshold
-
-                        if not passed:
-                            risk_violations.append({
-                                "date": date_str, "symbol": "", "rule_type": rtype,
-                                "value": round(val, 2), "threshold": threshold,
-                            })
-                            risk_blocked = True
-                            break
-
-                if not risk_blocked and total_cost <= capital:
-                    total_cost_basis = position * avg_entry_price + cost
-                    position += shares
-                    capital -= total_cost
-                    avg_entry_price = total_cost_basis / position if position > 0 else 0
-                    total_stocks_held += 1
-=======
+            # T+1: shares bought on prior days become available on date change
             if last_date is not None and date_str != last_date:
                 available = position
             last_date = date_str
@@ -506,44 +444,79 @@ class BacktestEngine:
                 buy_amount = capital * 0.95
                 raw_shares = buy_amount / (price * (1 + slippage))
                 shares = float(int(raw_shares // LOT_SIZE) * LOT_SIZE)
+
+                risk_blocked = False
+                total_cost = 0.0
+                fill_price = 0.0
+                fees = None
+
                 if shares >= LOT_SIZE:
                     fill_price = price * (1 + slippage)
                     fees = fee_engine.calculate("buy", fill_price, shares)
                     total_cost = fees.amount + fees.total
-                    if total_cost <= capital + 1e-6:
-                        lot_cost = fees.amount + fees.total
-                        total_cost_basis = position * avg_entry_price + lot_cost
-                        position += shares
-                        capital -= total_cost
-                        avg_entry_price = total_cost_basis / position if position > 0 else 0
-                        trades.append({
-                            "date": date_str,
-                            "side": "buy",
-                            "price": round(fill_price, 2),
-                            "quantity": round(shares, 2),
-                            "amount": round(fees.amount, 2),
-                            "commission": round(fees.total, 2),
-                            "pnl": 0,
-                        })
 
-            elif prev_sell_signal and available > 0 and price > 0:
-                sell_qty = float(int(available // LOT_SIZE) * LOT_SIZE) if available >= LOT_SIZE else available
-                if sell_qty > 0:
-                    fill_price = price * (1 - slippage)
-                    fees = fee_engine.calculate("sell", fill_price, sell_qty)
-                    total_received = fees.amount - fees.total
-                    pnl = total_received - (sell_qty * avg_entry_price)
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+                    if risk_rules:
+                        portfolio_value = capital + position * price
+                        for rule in risk_rules:
+                            rtype = rule.get("rule_type", "")
+                            op = rule.get("operator", "lt")
+                            threshold = rule.get("threshold", 0)
+
+                            if rtype == "order_amount":
+                                val = total_cost
+                            elif rtype == "position_pct":
+                                new_pos_val = (position + shares) * price
+                                val = (new_pos_val / portfolio_value * 100) if portfolio_value > 0 else 0
+                            elif rtype == "total_stocks":
+                                val = total_stocks_held + 1
+                            elif rtype == "daily_loss":
+                                val = daily_loss
+                            elif rtype == "max_daily_loss":
+                                val = (daily_loss / portfolio_value * 100) if portfolio_value > 0 else 0
+                            elif rtype == "drawdown":
+                                val = (
+                                    ((avg_entry_price - price) / avg_entry_price * 100)
+                                    if avg_entry_price > 0 and position > 0 else 0
+                                )
+                            else:
+                                continue
+
+                            passed = True
+                            if op == "gt":
+                                passed = val > threshold
+                            elif op == "lt":
+                                passed = val < threshold
+                            elif op == "ge":
+                                passed = val >= threshold
+                            elif op == "le":
+                                passed = val <= threshold
+                            elif op == "eq":
+                                passed = val == threshold
+
+                            if not passed:
+                                risk_violations.append({
+                                    "date": date_str, "symbol": "", "rule_type": rtype,
+                                    "value": round(val, 2), "threshold": threshold,
+                                })
+                                risk_blocked = True
+                                break
+
+                if shares >= LOT_SIZE and not risk_blocked and total_cost <= capital + 1e-6:
+                    lot_cost = fees.amount + fees.total
+                    total_cost_basis = position * avg_entry_price + lot_cost
+                    position += shares
+                    capital -= total_cost
+                    avg_entry_price = total_cost_basis / position if position > 0 else 0
+                    total_stocks_held += 1
                     trades.append({
                         "date": date_str,
-                        "side": "sell",
+                        "side": "buy",
                         "price": round(fill_price, 2),
-                        "quantity": round(sell_qty, 2),
+                        "quantity": round(shares, 2),
                         "amount": round(fees.amount, 2),
                         "commission": round(fees.total, 2),
-                        "pnl": round(pnl, 2),
+                        "pnl": 0,
                     })
-<<<<<<< HEAD
                 elif risk_blocked:
                     trades.append({
                         "date": date_str,
@@ -556,35 +529,35 @@ class BacktestEngine:
                         "risk_rejected": True,
                     })
 
-            elif prev_sell_signal and position > 0:
-                sell_value = position * price * (1 - slippage)
-                commission = max(sell_value * commission_rate, 5.0)
-                total_received = sell_value - commission
-                pnl = total_received - (position * avg_entry_price)
-                trades.append({
-                    "date": date_str,
-                    "side": "sell",
-                    "price": round(price, 2),
-                    "quantity": round(position, 2),
-                    "amount": round(sell_value, 2),
-                    "commission": round(commission, 2),
-                    "pnl": round(pnl, 2),
-                })
-                capital += total_received
-                if pnl < 0:
-                    daily_loss += abs(pnl)
-                position = 0.0
-                avg_entry_price = 0.0
-                total_stocks_held = 0
-=======
+            elif prev_sell_signal and available > 0 and price > 0:
+                sell_qty = (
+                    float(int(available // LOT_SIZE) * LOT_SIZE)
+                    if available >= LOT_SIZE else available
+                )
+                if sell_qty > 0:
+                    fill_price = price * (1 - slippage)
+                    fees = fee_engine.calculate("sell", fill_price, sell_qty)
+                    total_received = fees.amount - fees.total
+                    pnl = total_received - (sell_qty * avg_entry_price)
+                    trades.append({
+                        "date": date_str,
+                        "side": "sell",
+                        "price": round(fill_price, 2),
+                        "quantity": round(sell_qty, 2),
+                        "amount": round(fees.amount, 2),
+                        "commission": round(fees.total, 2),
+                        "pnl": round(pnl, 2),
+                    })
                     capital += total_received
+                    if pnl < 0:
+                        daily_loss += abs(pnl)
                     position -= sell_qty
                     available -= sell_qty
                     if position <= 1e-9:
                         position = 0.0
                         available = 0.0
                         avg_entry_price = 0.0
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+                        total_stocks_held = 0
 
             prev_buy_signal = buy_signal
             prev_sell_signal = sell_signal
@@ -592,15 +565,9 @@ class BacktestEngine:
         final_price = float(df["close"].iloc[-1]) if len(df) > 0 else 0
         final_capital = capital + position * final_price
 
-<<<<<<< HEAD
-        # Stats
         filled_trades = [t for t in trades if not t.get("risk_rejected")]
         winning_trades = len([t for t in filled_trades if t["side"] == "sell" and t.get("pnl", 0) > 0])
         losing_trades = len([t for t in filled_trades if t["side"] == "sell" and t.get("pnl", 0) <= 0])
-=======
-        winning_trades = len([t for t in trades if t["side"] == "sell" and t.get("pnl", 0) > 0])
-        losing_trades = len([t for t in trades if t["side"] == "sell" and t.get("pnl", 0) <= 0])
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         stats = {
             "final_capital": final_capital,
@@ -623,7 +590,6 @@ class BacktestEngine:
         if len(curves) == 1:
             return curves[0]
 
-        # Build a date → total_equity map
         date_equity: dict = {}
         for curve in curves:
             for entry in curve:
@@ -631,7 +597,6 @@ class BacktestEngine:
                 eq = entry.get("equity", 0)
                 date_equity[d] = date_equity.get(d, 0) + eq
 
-        # Sort by date
         merged = [{"date": d, "equity": round(eq, 2)}
                    for d, eq in sorted(date_equity.items())]
         return merged

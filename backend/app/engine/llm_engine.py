@@ -77,10 +77,6 @@ class LlmEngine:
     def configured_providers(self) -> list[str]:
         return [pid for pid in _PROVIDERS if self.get_credentials(pid)["configured"]]
 
-    def list_status(self) -> dict:
-        from app.core.config import llm_provider_snapshot
-        return llm_provider_snapshot(mask_keys=True)
-
     def chat(
         self,
         messages: list[dict[str, str]],

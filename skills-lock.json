@@ -1,0 +1,167 @@
+{
+  "version": 1,
+  "skills": {
+    "alpha-autopilot": {
+      "source": "VernonOY/alpha-skills",
+      "sourceType": "github",
+      "skillPath": "skills/alpha-autopilot/SKILL.md",
+      "computedHash": "afbcbbe1ec1098b49386b9cb6272a94b53f15a59df0bd48abb371d0861d0659b"
+    },
+    "alpha-backtest": {
+      "source": "VernonOY/alpha-skills",
+      "sourceType": "github",
+      "skillPath": "skills/alpha-backtest/SKILL.md",
+      "computedHash": "ed142636915d7f77b4a74e0685703422a3e4ab21257da37232ce75b2bf1b70cd"
+    },
+    "alpha-discover": {
+      "source": "VernonOY/alpha-skills",
+      "sourceType": "github",
+      "skillPath": "skills/alpha-discover/SKILL.md",
+      "computedHash": "d6aa01c46a2c2c0992243d4ce31ca302673de744f10fa1afd76f45407155ff16"
+    },
+    "alpha-evaluate": {
+      "source": "VernonOY/alpha-skills",
+      "sourceType": "github",
+      "skillPath": "skills/alpha-evaluate/SKILL.md",
+      "computedHash": "b4e9e84682ccb47880213cd161b7a277ed120d073b87dc2169cb600394d9ab7d"
+    },
+    "alpha-library": {
+      "source": "VernonOY/alpha-skills",
+      "sourceType": "github",
+      "skillPath": "skills/alpha-library/SKILL.md",
+      "computedHash": "45de7fab8bc170e2e3bc783eda8040a737e458b030ada0bb18266c2679e349dc"
+    },
+    "alpha-mine": {
+      "source": "VernonOY/alpha-skills",
+      "sourceType": "github",
+      "skillPath": "skills/alpha-mine/SKILL.md",
+      "computedHash": "141dfeb920704f2a098dd2c79cbc0eebc988ba75ff95a0ebca4c18fbe0175d0d"
+    },
+    "alpha-monitor": {
+      "source": "VernonOY/alpha-skills",
+      "sourceType": "github",
+      "skillPath": "skills/alpha-monitor/SKILL.md",
+      "computedHash": "93cc6d6223a3a239c154adbb038d8e01f1bff0a328c4b9b3e01eca042b7ab35b"
+    },
+    "alpha-report": {
+      "source": "VernonOY/alpha-skills",
+      "sourceType": "github",
+      "skillPath": "skills/alpha-report/SKILL.md",
+      "computedHash": "734dada76f6a71399ca600af9e7a384f8b642975488c19583dcf5ac0bf336001"
+    },
+    "alpha-signal": {
+      "source": "VernonOY/alpha-skills",
+      "sourceType": "github",
+      "skillPath": "skills/alpha-signal/SKILL.md",
+      "computedHash": "ba9389134a065a56f66d8c05f5e30e52943df7b9f7cd63eab2a496eea1ec8f87"
+    },
+    "llmquant-commodities": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-commodities/SKILL.md",
+      "computedHash": "50df0a887d38cd9f5f0fc5e8f6c86f7ba2742425211b0d352fba526ff7ec769a"
+    },
+    "llmquant-credit": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-credit/SKILL.md",
+      "computedHash": "248c16a0363c9498e3a4d8b90c898bbd5775ffe753c27af4ead76bbfe62b593c"
+    },
+    "llmquant-crypto": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-crypto/SKILL.md",
+      "computedHash": "622788d1ed1952e1d82abcda8d6d0245437f888c49ec6871701c86b7c8682e8d"
+    },
+    "llmquant-data": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-data/SKILL.md",
+      "computedHash": "3bda87eae7518126adf9e8237e1ccb008edbfb65e5af2c6f96e6eb6cf27d0794"
+    },
+    "llmquant-equities": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-equities/SKILL.md",
+      "computedHash": "37fb732a88f787298bb74af4618313fdf961844a64fc49bca33f8467a9740e34"
+    },
+    "llmquant-equity-derivatives": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-equity-derivatives/SKILL.md",
+      "computedHash": "5744bc9c386484ae38bb5b37b04588b627413dd80f653e468eb80543b20a5074"
+    },
+    "llmquant-etfs": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-etfs/SKILL.md",
+      "computedHash": "ce8d463864fe594eb77e8a4743e8cb522aed5eede6f42bf024d26e8e7673e1de"
+    },
+    "llmquant-events": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-events/SKILL.md",
+      "computedHash": "a0de3f07593ba12aa4c0f48ed181a24615faab13c23508d5cdecbfcc7fb154f5"
+    },
+    "llmquant-investor-lenses": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-investor-lenses/SKILL.md",
+      "computedHash": "6bba77086d99f71c3a56a6e493d0152653f3653a00cf7a9fe128414dbd0c626e"
+    },
+    "llmquant-macro": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-macro/SKILL.md",
+      "computedHash": "dc3f14e955cc2cea78ad87f1d0959ee74f70e82fd75bef4f2c71cbefa5152dbc"
+    },
+    "llmquant-market-intelligence": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-market-intelligence/SKILL.md",
+      "computedHash": "c30d36115be308dc2472fbd97a29f792d61b6d6f9b4b1ff3346195f40d8005d0"
+    },
+    "llmquant-options": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-options/SKILL.md",
+      "computedHash": "4e9e6424e2cf688b630db4975cc4095b6c0715369e15a0d91d892be4f44eea99"
+    },
+    "llmquant-portfolio": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-portfolio/SKILL.md",
+      "computedHash": "f9105f5d2824d83fe488d006dd9021e9bba72c5ec5fe395cbd58c27a91618a73"
+    },
+    "llmquant-portfolio-lab": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-portfolio-lab/SKILL.md",
+      "computedHash": "9f89714bda45b8f366972af98ad96ff2ae76b4c55fe1987ab52269ba26db7a2a"
+    },
+    "llmquant-prediction-markets": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-prediction-markets/SKILL.md",
+      "computedHash": "b5a7f7c3f6e1a5b3dcd2cf01af79bfa56c23ab65f8094fff68c8ba536b08f227"
+    },
+    "llmquant-rates-fx": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-rates-fx/SKILL.md",
+      "computedHash": "8c5535cb1d55ea048c7f1725112fa05f299432b766415886f08393f5ee9ba699"
+    },
+    "llmquant-risk": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-risk/SKILL.md",
+      "computedHash": "7e8ac22f832851c3ac8b5547b2f4ed266f2ee1a6b9b7dec63701776a0e52a181"
+    },
+    "llmquant-strategies": {
+      "source": "LLMQuant/skills",
+      "sourceType": "github",
+      "skillPath": "skills/llmquant-strategies/SKILL.md",
+      "computedHash": "927744feb5e8a823155556df98140751068fbdbd7ad114afcb011c514b4cfce9"
+    }
+  }
+}

@@ -56,6 +56,10 @@ class StrategyExecutor:
         self._tasks: Dict[int, asyncio.Task] = {}
         self._running = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._intervals: Dict[int, int] = {}
+
+    def _interval_for(self, strategy_id: int) -> int:
+        return self._intervals.get(strategy_id, self.DEFAULT_INTERVAL)
 
     async def startup(self):
         """Scan DB for running strategies and restart them."""
@@ -128,40 +132,6 @@ class StrategyExecutor:
         self._tasks[strategy_id] = task
 
     async def _run_loop(self, strategy_id: int):
-<<<<<<< HEAD
-        """Main execution loop for a single strategy. Interval adapts to time_frame."""
-        while True:
-            db = SessionLocal()
-            try:
-                strat = db.query(Strategy).filter(Strategy.id == strategy_id).first()
-                if not strat or not strat.is_active or strat.status != "running":
-                    break
-
-                if not strat.symbols:
-                    await asyncio.sleep(self.DEFAULT_INTERVAL)
-                    continue
-
-                # Determine check interval from strategy's time_frame
-                interval = self.INTERVAL_MAP.get(
-                    strat.time_frame, self.DEFAULT_INTERVAL
-                )
-
-                await self._execute_signals(db, strat)
-                db.commit()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[Strategy] Error in strategy {strategy_id}: {e}")
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                interval = self.DEFAULT_INTERVAL
-            finally:
-                db.close()
-
-            await asyncio.sleep(interval)
-=======
         """Main execution loop for a single strategy.
 
         Heavy sync IO (history/quotes/DB) runs in a worker thread so the
@@ -177,9 +147,10 @@ class StrategyExecutor:
                     break
                 except Exception as e:
                     logger.error(f"[Strategy] Error in strategy {strategy_id}: {e}")
-                await asyncio.sleep(self._interval)
+                await asyncio.sleep(self._interval_for(strategy_id))
         finally:
             self._tasks.pop(strategy_id, None)
+            self._intervals.pop(strategy_id, None)
 
     def _tick_once(self, strategy_id: int) -> bool:
         """One synchronous strategy tick. Returns False when the strategy should stop."""
@@ -188,6 +159,10 @@ class StrategyExecutor:
             strat = db.query(Strategy).filter(Strategy.id == strategy_id).first()
             if not strat or not strat.is_active or strat.status != "running":
                 return False
+
+            self._intervals[strategy_id] = self.INTERVAL_MAP.get(
+                (strat.time_frame or "1d").lower(), self.DEFAULT_INTERVAL
+            )
 
             if not strat.symbols:
                 return True
@@ -217,50 +192,46 @@ class StrategyExecutor:
             raise
         finally:
             db.close()
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
-    async def _execute_signals(self, db: Session, strat: Strategy):
+    def _execute_signals(self, db: Session, strat: Strategy):
         """Fetch data, compute signals, and place orders for one strategy tick.
 
-        Core 1: Checks market environment before any trading.
-        Core 2: Filters stocks by top-N bullish sectors for right_side_entry strategy.
-
-        Performance: Batch-fetches quotes for ALL symbols upfront, and runs
-        history data fetches in parallel via thread pool to avoid sequential HTTP waits.
+        Runs synchronously (called from ``_tick_once`` via ``asyncio.to_thread``).
         """
-        loop = asyncio.get_running_loop()
-
         # ── Layer 0: Market Environment Check (Core 1) ──
-        env = await loop.run_in_executor(None, market_env_engine.check_environment)
+        env = market_env_engine.check_environment()
+        env_exposure = float(env.get("exposure_mult") if env.get("exposure_mult") is not None else (
+            1.0 if env.get("can_trade") else 0.0
+        ))
         if env["env_state"] == "bear":
             logger.info(
                 f"[Strategy] Market BEARISH — locking ALL buy signals "
                 f"(strategy {strat.id}: {strat.name})"
             )
             buy_locked = True
-        elif not env.get("can_trade", False):
+        elif not env.get("can_trade", False) or env_exposure < 0.15:
             logger.info(
-                f"[Strategy] Market NEUTRAL — buy signals suppressed "
-                f"(strategy {strat.id}: {strat.name})"
+                f"[Strategy] Market NEUTRAL/low-exposure — buy signals suppressed "
+                f"(strategy {strat.id}: {strat.name}, exposure={env_exposure})"
             )
             buy_locked = True
         else:
             buy_locked = False
+        # Stash for sizing on this tick
+        strat._tick_env_exposure = env_exposure  # type: ignore[attr-defined]
+        strat._tick_env_shallow = bool((env.get("checklist") or {}).get("shallow_pullback"))  # type: ignore[attr-defined]
+        strat._tick_env_msg = env.get("message") or ""  # type: ignore[attr-defined]
 
         # ── Layer 1: Sector Filter (Core 2) for right_side_entry ──
+        # Only blocks new buys; sells on existing holdings still allowed.
         allowed_symbols = set(strat.symbols)
         if strat.strategy_type == "right_side_entry":
             try:
-                top_sectors = await loop.run_in_executor(
-                    None, sector_engine.get_top_sectors, 10
-                )
+                top_sectors = sector_engine.get_top_sectors(10)
                 if top_sectors:
-                    sector_stocks = await loop.run_in_executor(
-                        None,
-                        lambda: sector_engine.filter_stocks_by_sector(
-                            [s["sector_code"] for s in top_sectors],
-                            limit_per_sector=30,
-                        )
+                    sector_stocks = sector_engine.filter_stocks_by_sector(
+                        [s["sector_code"] for s in top_sectors],
+                        limit_per_sector=30,
                     )
                     if sector_stocks:
                         allowed_symbols = set(sector_stocks) & set(strat.symbols)
@@ -275,135 +246,73 @@ class StrategyExecutor:
                             )
             except Exception as e:
                 logger.warning(f"[Strategy] Sector filter error: {e}, skipping buy opens")
-                # Fail closed for buys: still allow sells on existing symbols
                 allowed_symbols = set(strat.symbols)
 
-<<<<<<< HEAD
-        # ── Batch-fetch quotes for ALL symbols upfront ──
         end_date = datetime.datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=120)).strftime("%Y-%m-%d")
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=280)).strftime("%Y-%m-%d")
 
-        # Fetch history data for all eligible symbols in parallel
-        symbols_to_check = [s for s in strat.symbols if s in allowed_symbols]
-        if not symbols_to_check:
-            return
-
-        async def fetch_one_symbol(symbol: str):
-            """Fetch history and compute signals for one symbol in thread pool."""
-            df = await loop.run_in_executor(
-                None, data_engine.get_history_data, symbol, start_date, end_date
-=======
-        # Batch realtime quotes once per tick (avoid N serial HTTP)
         quote_map: dict = {}
         try:
-            quote_map = data_engine.get_realtime_quotes_batch(list(strat.symbols)) or {}
+            quote_map = data_engine.batch_get_quotes(list(strat.symbols)) or {}
         except Exception as e:
             logger.warning(f"[Strategy] batch quotes skipped: {e}")
+            try:
+                quote_map = data_engine.get_realtime_quotes_batch(list(strat.symbols)) or {}
+            except Exception:
+                quote_map = {}
 
         for symbol in strat.symbols:
-            # Check if stock passes sector filter
-            if symbol not in allowed_symbols:
-                # Still allow sell if we hold the name
-                pass
+            df = data_engine.get_history_data(symbol, start_date, end_date)
+            if df is None or getattr(df, "empty", True):
+                continue
 
-            # Enough bars for MA60 / right_side_entry / trend strategies (~180 trading days)
-            df = data_engine.get_history_data(
-                symbol,
-                start_date=(datetime.datetime.now() - datetime.timedelta(days=280)).strftime("%Y-%m-%d"),
-                end_date=datetime.datetime.now().strftime("%Y-%m-%d"),
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
-            )
-            if df is None or df.empty:
-                return None
             try:
                 signals_df = strategy_engine.calculate_signals(
                     strat.strategy_type, df, strat.parameters
                 )
             except ValueError:
-                return None
-            if signals_df is None or signals_df.empty:
-                return None
-            return (symbol, signals_df)
-
-        # Run all symbol fetches in parallel
-        results = await asyncio.gather(
-            *[fetch_one_symbol(s) for s in symbols_to_check],
-            return_exceptions=True,
-        )
-
-<<<<<<< HEAD
-        # Batch-fetch real-time quotes for symbols that have signals
-        signal_symbols = []
-        signal_data = {}
-        for r in results:
-            if isinstance(r, Exception) or r is None:
                 continue
-            sym, sig_df = r
-            latest = sig_df.iloc[-1]
-            buy_signal = latest.get("buy_signal", False)
-            sell_signal = latest.get("sell_signal", False)
-            if buy_signal or sell_signal:
-                signal_symbols.append(sym)
-                signal_data[sym] = (sig_df, buy_signal, sell_signal, latest)
-=======
-            # Get the latest signal
+
+            if signals_df is None or getattr(signals_df, "empty", True):
+                continue
+
             latest = signals_df.iloc[-1]
             buy_signal = bool(latest.get("buy_signal", False))
             sell_signal = bool(latest.get("sell_signal", False))
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
-        if not signal_symbols:
-            return
+            if not buy_signal and not sell_signal:
+                continue
 
-<<<<<<< HEAD
-        # Batch-fetch quotes for all signal symbols in one go
-        quotes_map = await loop.run_in_executor(
-            None, data_engine.batch_get_quotes, signal_symbols
-        )
-
-        # Process each signal
-        for symbol, (sig_df, buy_signal, sell_signal, latest) in signal_data.items():
-=======
-            # Prefer sell when both fire — never open while exiting
+            # Prefer sell when both fire
             if buy_signal and sell_signal:
                 buy_signal = False
 
-            # Sector filter only blocks new buys
             if buy_signal and symbol not in allowed_symbols:
                 continue
 
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
-            # ── Suppress buy signals when market is not bullish ──
             if buy_signal and buy_locked:
                 logger.info(
-                    f"[Strategy] Buy signal suppressed for {symbol}: market not bullish"
+                    f"[Strategy] Buy signal suppressed for {symbol}: market not tradeable "
+                    f"({getattr(strat, '_tick_env_msg', '')})"
                 )
                 notification_engine.system(
                     user_id=strat.user_id,
                     title="买入信号被拦截",
-                    message=f"{symbol} 出现买入信号，但大盘环境不允许多头开仓，已自动跳过。"
+                    message=(
+                        f"{symbol} 出现买入信号，但大盘环境不允许开仓"
+                        f"（{getattr(strat, '_tick_env_msg', '环境锁定')}），已自动跳过。"
+                    ),
                 )
                 continue
 
-<<<<<<< HEAD
-            quote = quotes_map.get(symbol, {})
-            price = quote.get("current_price", 0)
-            if price <= 0:
-                continue
-
-            side = "buy" if buy_signal else "sell"
-            quantity = self._calc_quantity(db, strat, symbol, price, side)
-=======
             side = "buy" if buy_signal else "sell"
 
-            # Dedup: same strategy+symbol+side only once per Shanghai trading day
             if self._already_acted_today(db, strat, symbol, side):
                 logger.info(
                     f"[Strategy] Dedup skip {strat.id} {side} {symbol} (already acted today)"
                 )
                 continue
 
-            # Do not pyramid-buy if already holding this symbol for the strategy
             if side == "buy" and self._has_open_position(db, strat, symbol):
                 logger.info(
                     f"[Strategy] Skip buy {symbol}: already holding for strategy {strat.id}"
@@ -423,12 +332,9 @@ class StrategyExecutor:
             quantity = self._calc_quantity(
                 db, strat, price, side, symbol=symbol, price_history=df
             )
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
-
             if quantity <= 0:
                 continue
 
-            # ── Notification: signal detected ──
             signal_strength = latest.get("signal_strength", 0)
             if buy_signal:
                 notification_engine.signal_buy(
@@ -462,8 +368,9 @@ class StrategyExecutor:
                         reason=reason,
                     )
 
-            order_notional = fee_engine.buy_cost(price, quantity) if side == "buy" else price * quantity
-            # Risk check with action semantics
+            order_notional = (
+                fee_engine.buy_cost(price, quantity) if side == "buy" else price * quantity
+            )
             risk_result = risk_engine.check_order(
                 db, strat.user_id, symbol, side, quantity, price, order_notional,
                 trade_mode=strat.mode or None,
@@ -506,7 +413,6 @@ class StrategyExecutor:
                     f"{warn.get('current_value')} vs {warn.get('threshold')}"
                 )
 
-            # Place order — honor strategy.mode (paper|live); resolve_trade_mode gates live
             try:
                 from app.engine.trading_engine import TradingEngineError
                 mode = strat.mode or trading_engine.get_user_mode(db, strat.user_id)
@@ -515,15 +421,15 @@ class StrategyExecutor:
                     strategy_id=strat.id, remark=f"Auto: {strat.name}",
                     mode_override=mode,
                 )
-            except TradingEngineError as e:
+            except Exception as e:
+                # TradingEngineError or other reject
                 logger.info(f"[Strategy] Order rejected {strat.id}: {e}")
                 continue
+
             logger.info(
                 f"[Strategy] Placed {side} {symbol} x{quantity} @ {price} "
                 f"for strategy {strat.id}: {strat.name}"
             )
-
-            # ── Notification: order placed ──
             notification_engine.order_placed(
                 user_id=strat.user_id,
                 symbol=symbol,
@@ -535,20 +441,6 @@ class StrategyExecutor:
                 order_id=order.id if order else 0,
             )
 
-<<<<<<< HEAD
-    def _calc_quantity(self, db: Session, strat: Strategy, symbol: str, price: float, side: str) -> float:
-        """Calculate order quantity based on strategy type and capital."""
-        if side == "sell":
-            # Sell all existing position for this symbol + strategy
-            from app.models.position import Position as PositionModel
-            pos = db.query(PositionModel).filter(
-                PositionModel.user_id == strat.user_id,
-                PositionModel.strategy_id == strat.id,
-                PositionModel.symbol == symbol,
-                PositionModel.quantity > 0,
-            ).first()
-            return pos.quantity if pos else 0
-=======
     @staticmethod
     def _already_acted_today(db: Session, strat: Strategy, symbol: str, side: str) -> bool:
         """True if this strategy already traded or has open order for symbol+side today."""
@@ -608,40 +500,12 @@ class StrategyExecutor:
             return trading_engine.get_available_quantity(
                 db, strat.user_id, symbol, strat.id, mode
             )
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         if strat.strategy_type == "dca":
             fixed_amount = float((strat.parameters or {}).get("fixed_amount", 1000))
             raw = fixed_amount / price if price > 0 else 0
             return trading_engine.normalize_quantity(raw, "buy")
 
-<<<<<<< HEAD
-        # Default: use 20% of remaining cash per signal
-        # Use SQL aggregation instead of loading all trades into memory
-        from app.models.trade import Trade
-        from app.models.user import User
-        from sqlalchemy import func, case
-
-        user = db.query(User).filter(User.id == strat.user_id).first()
-        if not user:
-            return 0
-
-        # Single aggregated query: sum bought amounts and sold amounts
-        agg = db.query(
-            func.coalesce(
-                func.sum(case((Trade.side == "buy", Trade.amount + Trade.commission), else_=0)), 0
-            ).label("total_bought"),
-            func.coalesce(
-                func.sum(case((Trade.side == "sell", Trade.amount - Trade.commission), else_=0)), 0
-            ).label("total_sold"),
-        ).filter(Trade.user_id == strat.user_id).first()
-
-        total_bought = float(agg.total_bought)
-        total_sold = float(agg.total_sold)
-        cash = user.initial_cash - total_bought + total_sold
-        buy_amount = cash * 0.2
-        return buy_amount / price if price > 0 else 0
-=======
         cash = max(trading_engine.get_cash_balance(db, strat.user_id, mode), 0.0)
         params = strat.parameters or {}
         target_vol = float(params.get("target_volatility", 0.15))  # annualized
@@ -662,13 +526,23 @@ class StrategyExecutor:
                 pass
 
         position_pct = max(0.05, min(position_pct, max_pct))
+        # Align auto size with env exposure (shallow pullback → 40~55% of normal)
+        env_exp = float(getattr(strat, "_tick_env_exposure", 1.0) or 1.0)
+        env_exp = max(0.15, min(1.0, env_exp))
+        position_pct *= env_exp
+        if getattr(strat, "_tick_env_shallow", False):
+            position_pct = min(position_pct, max_pct * 0.5)
+            logger.info(
+                f"[Strategy] Shallow-pullback size cut → position_pct={position_pct:.3f} "
+                f"(env_exp={env_exp})"
+            )
         buy_amount = cash * position_pct
         raw = buy_amount / price if price > 0 else 0
         qty = trading_engine.normalize_quantity(raw, "buy")
-        if qty < LOT_SIZE and cash >= price * LOT_SIZE * 1.002:
+        # Do NOT force a full lot when env is in reduced-exposure mode
+        if qty < LOT_SIZE and env_exp >= 0.85 and cash >= price * LOT_SIZE * 1.002:
             qty = float(LOT_SIZE)
         return qty
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
 
 strategy_executor = StrategyExecutor()

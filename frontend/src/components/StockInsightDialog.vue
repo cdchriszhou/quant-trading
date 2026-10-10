@@ -2,13 +2,33 @@
   <el-dialog
     :model-value="store.visible"
     :title="dialogTitle"
-    width="720px"
-    top="6vh"
+    :width="fullscreen ? '100%' : `${dlgWidth}px`"
+    :fullscreen="fullscreen"
+    :top="fullscreen ? '0' : '4vh'"
+    draggable
+    overflow
     destroy-on-close
     append-to-body
+    align-center
     class="stock-insight-dialog"
-    @close="store.close()"
+    @close="onClose"
+    @opened="onOpened"
   >
+    <template #header="{ titleId, titleClass }">
+      <div class="dlg-header">
+        <span :id="titleId" :class="titleClass" class="dlg-title">{{ dialogTitle }}</span>
+        <el-button
+          class="dlg-fs-btn"
+          text
+          size="small"
+          :title="fullscreen ? '退出全屏' : '全屏'"
+          @click.stop="toggleFullscreen"
+        >
+          <el-icon :size="16"><FullScreen /></el-icon>
+        </el-button>
+      </div>
+    </template>
+
     <div v-loading="loading" class="insight-body">
       <el-alert
         v-if="error"
@@ -20,7 +40,7 @@
       />
 
       <template v-if="data">
-        <el-tabs v-model="tab">
+        <el-tabs v-model="tab" class="insight-tabs">
           <el-tab-pane label="行情" name="market">
             <div class="quote-head">
               <div>
@@ -91,23 +111,68 @@
               </a>
             </div>
           </el-tab-pane>
+
+          <el-tab-pane label="K线图" name="kline" lazy>
+            <div class="kline-toolbar">
+              <el-radio-group v-model="klinePeriod" size="small" @change="loadKline">
+                <el-radio-button value="1d">日K</el-radio-button>
+                <el-radio-button value="1w">周K</el-radio-button>
+                <el-radio-button value="1h">60分</el-radio-button>
+                <el-radio-button value="15m">15分</el-radio-button>
+              </el-radio-group>
+              <el-button text size="small" :loading="klineLoading" @click="loadKline">刷新</el-button>
+            </div>
+            <div v-loading="klineLoading" class="kline-wrap">
+              <div v-if="klineError" class="kline-empty">
+                <p>{{ klineError }}</p>
+                <el-button size="small" type="primary" plain @click="loadKline">重试</el-button>
+              </div>
+              <div v-else ref="klineChartRef" class="kline-chart"></div>
+            </div>
+          </el-tab-pane>
         </el-tabs>
       </template>
     </div>
+
+    <div
+      v-if="!fullscreen"
+      class="resize-handle"
+      title="拖动缩放"
+      @mousedown.prevent="startResize"
+    />
   </el-dialog>
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
+import * as echarts from 'echarts'
+import { FullScreen } from '@element-plus/icons-vue'
 import { marketApi } from '@/api/market'
 import { useStockInsightStore } from '@/stores/stockInsight'
 import { ElMessage } from 'element-plus'
+
+const MIN_W = 520
+const MIN_H = 420
+const DEFAULT_W = 780
+const DEFAULT_H = 640
 
 const store = useStockInsightStore()
 const loading = ref(false)
 const error = ref('')
 const data = ref(null)
 const tab = ref('market')
+
+const dlgWidth = ref(DEFAULT_W)
+const dlgHeight = ref(DEFAULT_H)
+const fullscreen = ref(false)
+let resizing = false
+
+const klinePeriod = ref('1d')
+const klineLoading = ref(false)
+const klineError = ref('')
+const klineChartRef = ref(null)
+let klineChart = null
+let klineLoadedFor = ''
 
 const market = computed(() => data.value?.market || {})
 const company = computed(() => data.value?.company || {})
@@ -118,6 +183,24 @@ const dialogTitle = computed(() => {
   const sym = store.symbol
   return name ? `${name}（${sym}）` : (sym || '股票详情')
 })
+
+function getDialogEl() {
+  return document.querySelector('.el-dialog.stock-insight-dialog')
+}
+
+function applyDlgSize() {
+  const el = getDialogEl()
+  if (!el) return
+  if (fullscreen.value) {
+    el.style.height = ''
+    el.style.maxHeight = ''
+    return
+  }
+  el.style.height = `${dlgHeight.value}px`
+  el.style.maxHeight = '92vh'
+  el.style.display = 'flex'
+  el.style.flexDirection = 'column'
+}
 
 const changeColor = computed(() => {
   const n = Number(market.value.change_pct)
@@ -176,7 +259,6 @@ function fmtVol(v) {
 function fmtAmount(v) {
   const n = Number(v)
   if (!Number.isFinite(n) || n <= 0) return '—'
-  // quote.amount is often already in 亿元
   if (n < 1000) return `${n.toFixed(2)}亿`
   if (n >= 1e8) return `${(n / 1e8).toFixed(2)}亿`
   return n.toLocaleString()
@@ -198,12 +280,168 @@ function onNewsClick(e, n) {
   }
 }
 
+function clamp(n, min, max) {
+  return Math.min(max, Math.max(min, n))
+}
+
+function resizeKlineChart() {
+  nextTick(() => klineChart?.resize())
+}
+
+function toggleFullscreen() {
+  fullscreen.value = !fullscreen.value
+  nextTick(() => {
+    applyDlgSize()
+    resizeKlineChart()
+  })
+}
+
+function startResize(e) {
+  if (fullscreen.value) return
+  resizing = true
+  const startX = e.clientX
+  const startY = e.clientY
+  const startW = dlgWidth.value
+  const startH = dlgHeight.value
+  const maxW = Math.floor(window.innerWidth * 0.96)
+  const maxH = Math.floor(window.innerHeight * 0.92)
+
+  const onMove = (ev) => {
+    if (!resizing) return
+    dlgWidth.value = clamp(startW + (ev.clientX - startX), MIN_W, maxW)
+    dlgHeight.value = clamp(startH + (ev.clientY - startY), MIN_H, maxH)
+    applyDlgSize()
+    resizeKlineChart()
+  }
+  const onUp = () => {
+    resizing = false
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    applyDlgSize()
+    resizeKlineChart()
+  }
+  document.body.style.cursor = 'nwse-resize'
+  document.body.style.userSelect = 'none'
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+}
+
+function onOpened() {
+  applyDlgSize()
+  resizeKlineChart()
+}
+
+function onClose() {
+  disposeKline()
+  store.close()
+}
+
+function disposeKline() {
+  if (klineChart) {
+    klineChart.dispose()
+    klineChart = null
+  }
+  klineLoadedFor = ''
+}
+
+function renderKline(rows) {
+  if (!klineChartRef.value) return
+  if (!klineChart) {
+    klineChart = echarts.init(klineChartRef.value)
+  }
+  const dates = rows.map((d) => d.date || d.time || '')
+  const values = rows.map((d) => [d.open, d.close, d.low, d.high])
+  const vols = rows.map((d) => d.volume || 0)
+  klineChart.setOption({
+    animation: false,
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    grid: [
+      { left: 48, right: 16, top: 24, height: '58%' },
+      { left: 48, right: 16, top: '78%', height: '14%' },
+    ],
+    xAxis: [
+      { type: 'category', data: dates, gridIndex: 0, boundaryGap: true, axisLabel: { show: false }, axisTick: { show: false } },
+      { type: 'category', data: dates, gridIndex: 1, boundaryGap: true, axisLabel: { rotate: 0, fontSize: 10, color: '#9ca3af' } },
+    ],
+    yAxis: [
+      { type: 'value', gridIndex: 0, scale: true, splitLine: { lineStyle: { color: '#f3f4f6' } }, axisLabel: { fontSize: 10 } },
+      { type: 'value', gridIndex: 1, scale: true, splitNumber: 2, axisLabel: { show: false }, splitLine: { show: false } },
+    ],
+    dataZoom: [
+      { type: 'inside', xAxisIndex: [0, 1], start: 40, end: 100 },
+    ],
+    series: [
+      {
+        type: 'candlestick',
+        data: values,
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        itemStyle: {
+          color: '#ef4444',
+          color0: '#10b981',
+          borderColor: '#ef4444',
+          borderColor0: '#10b981',
+        },
+      },
+      {
+        type: 'bar',
+        data: vols,
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        itemStyle: {
+          color: (p) => {
+            const row = rows[p.dataIndex]
+            if (!row) return 'rgba(156,163,175,0.45)'
+            return Number(row.close) >= Number(row.open)
+              ? 'rgba(239,68,68,0.35)'
+              : 'rgba(16,185,129,0.35)'
+          },
+        },
+      },
+    ],
+  }, true)
+  nextTick(() => klineChart?.resize())
+}
+
+async function loadKline() {
+  const symbol = store.symbol || data.value?.symbol
+  if (!symbol) return
+  klineLoading.value = true
+  klineError.value = ''
+  try {
+    const res = await marketApi.getKline(symbol, klinePeriod.value, 120)
+    const rows = res.data || res || []
+    if (!Array.isArray(rows) || !rows.length) {
+      klineError.value = '暂无K线数据'
+      disposeKline()
+      return
+    }
+    klineLoadedFor = `${symbol}:${klinePeriod.value}`
+    await nextTick()
+    renderKline(rows)
+  } catch (e) {
+    klineError.value = e?.response?.data?.detail || e?.message || 'K线加载失败'
+    disposeKline()
+  } finally {
+    klineLoading.value = false
+  }
+}
+
 async function load() {
   if (!store.symbol) return
   loading.value = true
   error.value = ''
   data.value = null
   tab.value = 'market'
+  disposeKline()
+  klineError.value = ''
+  klinePeriod.value = '1d'
+  fullscreen.value = false
+  dlgWidth.value = DEFAULT_W
+  dlgHeight.value = DEFAULT_H
   try {
     const res = await marketApi.getStockInsight(store.symbol)
     data.value = res.data || res
@@ -218,13 +456,71 @@ watch(
   () => [store.visible, store.symbol],
   ([vis]) => {
     if (vis && store.symbol) load()
+    if (!vis) disposeKline()
   }
 )
+
+watch(tab, async (name) => {
+  if (name !== 'kline') return
+  const key = `${store.symbol}:${klinePeriod.value}`
+  await nextTick()
+  if (klineLoadedFor !== key || !klineChart) {
+    await loadKline()
+  } else {
+    klineChart?.resize()
+  }
+})
+
+watch(fullscreen, () => nextTick(() => {
+  applyDlgSize()
+  resizeKlineChart()
+}))
+
+onBeforeUnmount(() => disposeKline())
 </script>
 
 <style scoped>
+.dlg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 28px;
+  width: 100%;
+}
+.dlg-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+  font-weight: 600;
+}
+.dlg-fs-btn {
+  flex-shrink: 0;
+  margin-right: 4px;
+}
 .insight-body {
-  min-height: 220px;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.insight-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.insight-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.insight-tabs :deep(.el-tab-pane) {
+  height: 100%;
 }
 .quote-head {
   display: flex;
@@ -276,14 +572,15 @@ watch(
   white-space: pre-wrap;
   line-height: 1.55;
   color: #374151;
-  max-height: 220px;
+  max-height: 280px;
   overflow-y: auto;
 }
 .news-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 420px;
+  max-height: none;
+  height: 100%;
   overflow-y: auto;
 }
 .news-item {
@@ -315,5 +612,81 @@ watch(
   margin-top: 6px;
   font-size: 11px;
   color: #9ca3af;
+}
+.kline-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.kline-wrap {
+  flex: 1;
+  min-height: 280px;
+  height: calc(100% - 40px);
+  position: relative;
+}
+.kline-chart {
+  width: 100%;
+  height: 100%;
+  min-height: 280px;
+}
+.kline-empty {
+  height: 100%;
+  min-height: 280px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #9ca3af;
+  font-size: 13px;
+}
+.resize-handle {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  z-index: 10;
+  background:
+    linear-gradient(135deg, transparent 0 45%, #c0c4cc 45% 55%, transparent 55% 70%, #c0c4cc 70% 80%, transparent 80%);
+  border-radius: 0 0 4px 0;
+}
+.resize-handle:hover {
+  background:
+    linear-gradient(135deg, transparent 0 45%, #00B4B4 45% 55%, transparent 55% 70%, #00B4B4 70% 80%, transparent 80%);
+}
+</style>
+
+<style>
+/* teleported dialog — unscoped flex layout */
+.stock-insight-dialog.el-dialog {
+  display: flex;
+  flex-direction: column;
+  max-width: 96vw;
+  position: relative;
+  overflow: hidden;
+}
+.stock-insight-dialog .el-dialog__header {
+  flex-shrink: 0;
+  margin-right: 0;
+  padding-right: 16px;
+}
+.stock-insight-dialog .el-dialog__body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: 20px;
+  position: relative;
+}
+.stock-insight-dialog.is-fullscreen {
+  margin: 0 !important;
+  height: 100vh !important;
+  max-height: 100vh !important;
 }
 </style>

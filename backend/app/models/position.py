@@ -24,9 +24,6 @@ class Position(Base):
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
-<<<<<<< HEAD
-    def to_dict(self, name: str = ""):
-=======
     def to_dict(self):
         from app.models.naming import resolve_symbol_name
         qty = float(self.quantity or 0)
@@ -36,17 +33,13 @@ class Position(Base):
         if mv <= 0 and cur > 0 and qty > 0:
             mv = round(cur * qty, 2)
         cost_total = round(avg * qty, 2) if avg > 0 and qty > 0 else 0.0
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         return {
             "id": self.id,
             "user_id": self.user_id,
             "strategy_id": self.strategy_id,
             "symbol": self.symbol,
-<<<<<<< HEAD
-            "name": name,
-=======
+            "name": resolve_symbol_name(self.symbol),
             "symbol_name": resolve_symbol_name(self.symbol),
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
             "quantity": self.quantity,
             "available_quantity": self.available_quantity,
             "avg_cost": avg,

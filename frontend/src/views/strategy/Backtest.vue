@@ -188,12 +188,8 @@
 </template>
 
 <script setup>
-<<<<<<< HEAD
-import { ref, reactive, onMounted, nextTick, watch } from 'vue'
-=======
-import { ref, reactive, onMounted, nextTick, computed } from 'vue'
+import { ref, reactive, onMounted, nextTick, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 import { strategyApi } from '@/api/strategy'
 import { backtestApi } from '@/api/backtest'
 import { marketApi } from '@/api/market'
@@ -280,7 +276,6 @@ const form = reactive({
 })
 
 const metrics = ref([])
-<<<<<<< HEAD
 
 // When strategy type changes, fetch default parameters for that type
 watch(() => form.strategy_type, async (newType) => {
@@ -295,8 +290,6 @@ watch(() => form.strategy_type, async (newType) => {
   }
 })
 
-=======
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 const comparisonResult = ref(null)
 
 async function onTypeChange(type) {
@@ -366,20 +359,12 @@ async function runBacktest() {
       enable_sector_filter: form.enable_sector_filter,
       comparison_mode: form.comparison_mode,
     }
-<<<<<<< HEAD
-    const res = await backtestApi.run(payload)
-    // Axios interceptor unwraps response.data → res is top-level API envelope
-    const filtered = res.filtered_result || res.data || res
-    result.value = filtered
-    comparisonResult.value = res.comparison ?? null
-=======
     const res = await backtestApi.run(payload, { timeout: 120000 })
     // axios interceptor already unwraps HTTP body:
     // { data: savedRow, filtered_result, comparison?, date_notes? }
     const filtered = res.filtered_result || res.data || res
     result.value = filtered
     comparisonResult.value = res.comparison || null
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
     const d = filtered
     metrics.value = [

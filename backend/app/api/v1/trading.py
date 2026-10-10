@@ -13,11 +13,8 @@ from app.schemas.trading import OrderCreate, OrderCancel
 from app.engine.trading_engine import trading_engine, TradingEngineError
 from app.engine.risk_engine import risk_engine
 from app.engine.data_engine import data_engine
-<<<<<<< HEAD
-=======
 from app.engine.fee_engine import fee_engine
 from app.engine.broker import broker_status
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
 router = APIRouter(prefix="/trading", tags=["Trading"])
 
@@ -117,24 +114,6 @@ def place_order(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-<<<<<<< HEAD
-    # Resolve real price for risk check (market orders use live quote)
-    if req.price and req.price > 0:
-        order_price = req.price
-    else:
-        try:
-            quote = data_engine.get_realtime_quote(req.symbol)
-            order_price = quote["current_price"]
-        except RuntimeError:
-            order_price = 0
-
-    order_amount = req.quantity * order_price if order_price > 0 else req.quantity
-
-    # Risk check
-    risk_result = risk_engine.check_order(
-        db, current_user.id, req.symbol, req.side, req.quantity,
-        order_price, order_amount
-=======
     order_price = req.price
     if order_price is None or order_price <= 0:
         try:
@@ -151,7 +130,6 @@ def place_order(
     risk_result = risk_engine.check_order(
         db, current_user.id, req.symbol, req.side, req.quantity,
         order_price, amount,
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     )
     if risk_result.get("should_pause"):
         return {

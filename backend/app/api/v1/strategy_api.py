@@ -61,7 +61,6 @@ def create_strategy(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-<<<<<<< HEAD
     # Auto-set initial_capital: use user's remaining cash if not explicitly provided
     from app.models.trade import Trade
     from sqlalchemy import func, case
@@ -86,11 +85,6 @@ def create_strategy(
             10000,  # minimum 1万
         )
 
-=======
-    mode = req.mode if req.mode in ("paper", "live") else "paper"
-    if mode == "live":
-        _require_live_ready()
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     strategy = Strategy(
         user_id=current_user.id,
         name=req.name,
@@ -100,15 +94,9 @@ def create_strategy(
         symbols=req.symbols,
         parameters=req.parameters or strategy_engine.get_default_params(req.strategy_type),
         time_frame=req.time_frame,
-<<<<<<< HEAD
         mode=req.mode,
         initial_capital=round(initial_capital, 2),
         current_capital=round(initial_capital, 2),
-=======
-        mode=mode,
-        initial_capital=req.initial_capital,
-        current_capital=req.initial_capital,
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     )
     db.add(strategy)
     db.commit()

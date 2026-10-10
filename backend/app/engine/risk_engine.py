@@ -134,7 +134,6 @@ class RiskEngine:
                 Position.trade_mode == trade_mode,
                 Position.quantity > 0,
             ).all()
-<<<<<<< HEAD
             total_market_value = sum(p.quantity * p.current_price for p in positions if p.current_price)
             new_position_value = amount if side == "buy" else 0
             total_value = total_market_value + new_position_value
@@ -163,26 +162,6 @@ class RiskEngine:
             current_cash = user.initial_cash - float(agg.total_bought) + float(agg.total_sold)
             portfolio_value = current_cash + total_market_value
             return (total_value / portfolio_value * 100) if portfolio_value > 0 else 0
-=======
-            user = db.query(User).filter(User.id == user_id).first()
-            initial = float(user.initial_cash) if user else 1000000.0
-
-            from app.engine.trading_engine import trading_engine
-            cash = trading_engine.get_cash_balance(db, user_id, trade_mode)
-            total_mv = sum(
-                float(p.quantity) * float(p.current_price or p.avg_cost or 0)
-                for p in positions
-            )
-            equity = cash + total_mv if (cash + total_mv) > 0 else initial
-
-            symbol_mv = 0.0
-            for p in positions:
-                if p.symbol == symbol:
-                    symbol_mv += float(p.quantity) * float(p.current_price or p.avg_cost or 0)
-            if side == "buy":
-                symbol_mv += amount
-            return (symbol_mv / equity * 100) if equity > 0 else 0
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         elif rule.rule_type == "total_stocks":
             positions = db.query(Position).filter(
@@ -195,12 +174,6 @@ class RiskEngine:
                 return len(symbols) + 1
             return len(symbols)
 
-<<<<<<< HEAD
-        elif rule.rule_type == "drawdown":
-            # Use real-time prices for drawdown calculation (not stale DB prices)
-            from app.engine.data_engine import data_engine
-
-=======
         elif rule.rule_type == "daily_loss":
             today_start = trading_day_start()
             today = db.query(Trade).filter(
@@ -219,13 +192,11 @@ class RiskEngine:
             if initial <= 0:
                 return 0
             cash = trading_engine.get_cash_balance(db, user_id, trade_mode)
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
             positions = db.query(Position).filter(
                 Position.user_id == user_id,
                 Position.trade_mode == trade_mode,
                 Position.quantity > 0,
             ).all()
-<<<<<<< HEAD
 
             if not positions:
                 return 0
@@ -243,29 +214,6 @@ class RiskEngine:
                     if dd > max_dd:
                         max_dd = dd
             return max_dd
-=======
-            mv = sum(
-                float(p.quantity) * float(p.current_price or p.avg_cost or 0)
-                for p in positions
-            )
-            equity = cash + mv
-            return max(0.0, (initial - equity) / initial * 100)
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
-
-        elif rule.rule_type == "daily_loss":
-            from datetime import datetime as dt
-            from sqlalchemy import func
-
-            today_start = dt.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            daily_loss = db.query(
-                func.coalesce(func.sum(func.abs(Trade.pnl)), 0)
-            ).filter(
-                Trade.user_id == user_id,
-                Trade.side == "sell",
-                Trade.pnl < 0,
-                Trade.trade_time >= today_start,
-            ).scalar()
-            return float(daily_loss)
 
         elif rule.rule_type == "max_daily_loss":
             # Global circuit breaker: total realized loss today as % of portfolio

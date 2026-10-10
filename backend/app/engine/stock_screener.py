@@ -56,17 +56,6 @@ class StockScreener:
                 results.append(screening)
         return results
 
-    def screen_stocks_all(self, symbols: list) -> list:
-        """Screen all symbols and return results with criteria flags (no filtering)."""
-        results = []
-        for sym in symbols:
-            results.append(self.check_criteria(sym))
-        results.sort(
-            key=lambda x: (x.get("criteria_met", False), x.get("buy_signal", False)),
-            reverse=True,
-        )
-        return results
-
     def check_criteria(self, symbol: str, df: pd.DataFrame = None) -> dict:
         """Check all four individual-stock criteria plus right-side signals.
 
@@ -187,19 +176,6 @@ class StockScreener:
         }
         self._cache[cache_key] = result
         return result
-
-    def detect_right_side_signal(self, symbol: str, df: pd.DataFrame = None) -> dict:
-        """Convenience wrapper: return only signal information."""
-        screening = self.check_criteria(symbol, df)
-        return {
-            "symbol": symbol,
-            "name": screening.get("name", symbol),
-            "buy_signal": screening["buy_signal"],
-            "buy_signal_strength": screening["buy_signal_strength"],
-            "sell_signal": screening["sell_signal"],
-            "sell_reason": screening["sell_reason"],
-            "criteria_met": screening["criteria_met"],
-        }
 
     # ── Internal signal logic ───────────────────────────────────────
 

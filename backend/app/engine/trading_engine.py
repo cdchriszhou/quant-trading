@@ -1,25 +1,7 @@
-"""Trading Engine: Unified order execution via pluggable broker adapters.
+"""Trading Engine: Paper/live order execution and position management."""
 
-<<<<<<< HEAD
-Supports both paper trading (PaperBroker) and live trading via real broker APIs
-(QMT, XTP, PTrade, CTP, custom). The TradingEngine now delegates all order
-execution to the configured Broker instance while maintaining local DB records
-for audit trail and fast queries.
-
-Architecture:
-    TradingEngine  →  BaseBroker (abstract)
-                         ├── PaperBroker   (simulated fills)
-                         ├── QMTBroker     (迅投QMT)
-                         ├── XTPBroker     (中泰XTP)
-                         └── CustomBroker  (user-provided)
-"""
-
-import asyncio
 import datetime
 import logging
-=======
-import datetime
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -31,7 +13,7 @@ from app.models.position import Position as PositionModel
 from app.engine.data_engine import data_engine
 from app.engine.fee_engine import fee_engine
 from app.engine.broker import get_broker
-from app.engine.market_calendar import trading_day_start, is_a_share_trading_session, next_session_hint
+from app.engine.market_calendar import trading_day_start
 
 # A-share lot size (主板/创业板常见 100 股一手)
 LOT_SIZE = 100
@@ -40,46 +22,30 @@ LOT_SIZE = 100
 class TradingEngineError(ValueError):
     """Raised when an order fails pre-trade validation."""
 
+
 logger = logging.getLogger("trading_engine")
 
 
 class TradingEngine:
-    """Handles order placement, execution, and position management.
+    """Handles order placement, execution, and position management."""
 
-    Delegates actual order execution to a pluggable Broker adapter.
-    Local DB records are always maintained for audit trail.
-    """
-
-<<<<<<< HEAD
-    def __init__(self):
-        self._commission_rate = settings.COMMISSION_RATE
-        self._min_commission = settings.MIN_COMMISSION
-
-    @property
-    def broker(self):
-        """Lazy-import the global broker instance (avoid circular imports)."""
-        from app.brokers import get_broker
-        return get_broker()
-
-    # ── Order placement ────────────────────────────────────────────
-
-    def place_order(self, db: Session, user_id: int, symbol: str, side: str,
-                    order_type: str, quantity: float, price: Optional[float] = None,
-                    strategy_id: Optional[int] = None, remark: str = "",
-                    mode_override: Optional[str] = None) -> Order:
-        """Place a new order — persists to DB and delegates to broker.
-
-        For paper mode: the broker fills instantly and we record the result.
-        For live mode: the broker submits the order; status updates come
-        later via async callbacks or polling.
-        """
-        # Determine trade mode
-=======
     def get_user_mode(self, db: Session, user_id: int) -> str:
         from app.models.user import User
         user = db.query(User).filter(User.id == user_id).first()
         mode = getattr(user, "account_mode", None) if user else None
         return mode or settings.TRADING_MODE or "paper"
+
+    def set_user_mode(self, db: Session, user_id: int, mode: str) -> str:
+        """Persist account mode (paper|live) on the user row."""
+        if mode not in ("paper", "live"):
+            raise TradingEngineError("mode 仅支持 paper / live")
+        from app.models.user import User
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise TradingEngineError("用户不存在")
+        user.account_mode = mode
+        db.commit()
+        return mode
 
     def resolve_trade_mode(
         self,
@@ -89,7 +55,6 @@ class TradingEngine:
         mode_override: Optional[str] = None,
     ) -> str:
         """Resolve trade mode from override → strategy → user preference."""
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         trade_mode = settings.TRADING_MODE
         if user_id:
             trade_mode = self.get_user_mode(db, user_id)
@@ -223,11 +188,6 @@ class TradingEngine:
         """Place a new order using real quotes + real fees."""
         trade_mode = self.resolve_trade_mode(db, user_id, strategy_id, mode_override)
 
-<<<<<<< HEAD
-        # Get current price from real-time quote
-        quote = data_engine.get_realtime_quote(symbol)
-        current_price = quote["current_price"]
-=======
         quote = data_engine.get_realtime_quote(symbol)
         if quote.get("data_source") == "simulated" or quote.get("_fallback"):
             raise TradingEngineError("行情为非真实数据，已拒绝下单")
@@ -247,14 +207,7 @@ class TradingEngine:
             self._validate_funds_and_position(
                 db, user_id, symbol, side, quantity, order_price, strategy_id, trade_mode
             )
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
-        if order_type == "market":
-            order_price = current_price
-        else:
-            order_price = price if price else current_price
-
-        # Create local order record
         order = Order(
             user_id=user_id,
             strategy_id=strategy_id,
@@ -271,83 +224,6 @@ class TradingEngine:
         db.commit()
         db.refresh(order)
 
-<<<<<<< HEAD
-        # Delegate to broker for actual execution
-        self._execute_via_broker(db, order, current_price)
-
-        return order
-
-    def _execute_via_broker(self, db: Session, order: Order, current_price: float):
-        """Submit order to broker and handle the result.
-
-        In paper mode: this is synchronous (fills instantly).
-        In live mode: this submits the order; the fill comes later.
-        """
-        # Run async broker call in a sync context
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop is not None and loop.is_running():
-            # We're inside an async context (e.g. strategy executor)
-            # Schedule the order submission — don't block the event loop
-            asyncio.ensure_future(self._submit_to_broker(db, order, current_price))
-        else:
-            # Synchronous context (e.g. FastAPI route handler)
-            # Run the broker call in a thread pool
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    asyncio.run, self._submit_to_broker(db, order, current_price)
-                )
-                future.result(timeout=30)
-
-    async def _submit_to_broker(self, db: Session, order: Order, current_price: float):
-        """Async: submit order to the broker and update DB with result."""
-        from app.brokers.base import OrderSide, OrderType, OrderRequest
-
-        try:
-            req = OrderRequest(
-                symbol=order.symbol,
-                side=OrderSide.BUY if order.side == "buy" else OrderSide.SELL,
-                order_type=OrderType.MARKET if order.order_type == "market" else OrderType.LIMIT,
-                quantity=order.quantity,
-                price=order.price if order.order_type == "limit" else 0,
-                strategy_id=order.strategy_id,
-                remark=order.remark or "",
-            )
-
-            result = await self.broker.submit_order(req)
-
-            # Update local order with broker result
-            order.broker_order_id = getattr(order, 'broker_order_id', None) or result.broker_order_id
-
-            if result.status.value == "filled":
-                self._record_fill(db, order, result.price, result.commission)
-            elif result.status.value == "rejected":
-                order.status = "rejected"
-                order.remark = (order.remark or "") + f" [券商拒绝: {result.error_message}]"
-                db.commit()
-            elif result.status.value in ("submitted", "pending"):
-                order.status = "submitted"
-                db.commit()
-            else:
-                order.status = result.status.value
-                db.commit()
-
-        except Exception as e:
-            logger.error(f"[Trading] Broker submit failed for order {order.id}: {e}")
-            order.status = "rejected"
-            order.remark = (order.remark or "") + f" [券商异常: {e}]"
-            db.commit()
-
-    def _record_fill(self, db: Session, order: Order, fill_price: float, commission: float = 0):
-        """Record a filled order in the local database (position, trade)."""
-        amount = fill_price * order.quantity
-        if commission <= 0:
-            commission = max(amount * self._commission_rate, self._min_commission)
-=======
         if trade_mode == "live":
             result = get_broker("live").place_order(
                 symbol, side, order_type, quantity, order_price
@@ -377,7 +253,6 @@ class TradingEngine:
         if order_type == "market":
             self._execute_order(db, order, current_price)
         elif order_type == "limit":
-            # Try immediate match against current quote
             if self._limit_can_fill(side, order_price, current_price):
                 self._execute_order(db, order, current_price)
 
@@ -530,7 +405,6 @@ class TradingEngine:
             order.updated_at = datetime.datetime.utcnow()
             db.commit()
             raise
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         order.filled_quantity = order.quantity
         order.commission = total_fee
@@ -547,7 +421,7 @@ class TradingEngine:
             order_id=order.id,
             symbol=order.symbol,
             side=order.side,
-            price=fill_price,
+            price=execution_price,
             quantity=order.quantity,
             amount=amount,
             commission=total_fee,
@@ -567,13 +441,9 @@ class TradingEngine:
             lot_cost = execution_price * order.quantity + total_fee
             if position:
                 new_quantity = position.quantity + order.quantity
-<<<<<<< HEAD
-                new_cost = (position.avg_cost * position.quantity + fill_price * order.quantity) / new_quantity
-=======
                 new_cost = (
                     position.avg_cost * position.quantity + lot_cost
                 ) / new_quantity
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                 position.quantity = new_quantity
                 position.available_quantity = float(position.available_quantity or 0)
                 position.avg_cost = round(new_cost, 4)
@@ -583,15 +453,9 @@ class TradingEngine:
                     strategy_id=order.strategy_id,
                     symbol=order.symbol,
                     quantity=order.quantity,
-<<<<<<< HEAD
-                    available_quantity=order.quantity,
-                    avg_cost=fill_price,
-                    current_price=fill_price,
-=======
                     available_quantity=0.0,
                     avg_cost=round(lot_cost / order.quantity, 4) if order.quantity else execution_price,
                     current_price=execution_price,
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                     market_value=amount,
                     unrealized_pnl=0,
                     unrealized_pnl_pct=0,
@@ -599,36 +463,6 @@ class TradingEngine:
                     trade_mode=order.trade_mode,
                 )
             db.add(position)
-<<<<<<< HEAD
-        else:  # sell
-            if not position or position.quantity <= 0:
-                order.status = "rejected"
-                order.remark = (order.remark or "") + " [卖出被拒绝：无可卖持仓]"
-                db.commit()
-                return
-
-            realized_pnl = (fill_price - position.avg_cost) * order.quantity
-            trade.pnl = round(realized_pnl, 2)
-
-            position.quantity -= order.quantity
-            position.available_quantity -= order.quantity
-            position.realized_pnl += realized_pnl
-            if position.quantity <= 0:
-                db.delete(position)
-            else:
-                try:
-                    quote = data_engine.get_realtime_quote(order.symbol)
-                    position.current_price = quote["current_price"]
-                except RuntimeError:
-                    position.current_price = fill_price
-                position.market_value = position.quantity * position.current_price
-                position.unrealized_pnl = round(
-                    (position.current_price - position.avg_cost) * position.quantity, 2
-                )
-                position.unrealized_pnl_pct = round(
-                    (position.current_price - position.avg_cost) / position.avg_cost * 100, 2
-                ) if position.avg_cost > 0 else 0
-=======
         else:
             if not position:
                 order.status = "rejected"
@@ -662,7 +496,7 @@ class TradingEngine:
             order.commission = fees.total
 
             position.quantity -= sell_qty
-            position.realized_pnl += trade.pnl
+            position.realized_pnl = float(position.realized_pnl or 0) + float(trade.pnl or 0)
             if position.quantity <= 1e-9:
                 db.delete(position)
             else:
@@ -674,7 +508,6 @@ class TradingEngine:
                 position.unrealized_pnl = round(
                     (execution_price - position.avg_cost) * position.quantity, 2
                 )
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         db.add(trade)
         db.commit()
@@ -682,34 +515,14 @@ class TradingEngine:
     # ── Order management ───────────────────────────────────────────
 
     def cancel_order(self, db: Session, order_id: int, user_id: int) -> Optional[Order]:
-<<<<<<< HEAD
-        """Cancel a pending order — DB + broker."""
-        order = db.query(Order).filter(
-            Order.id == order_id,
-            Order.user_id == user_id,
-            Order.status.in_(["pending", "submitted"]),
-=======
         order = db.query(Order).filter(
             Order.id == order_id,
             Order.user_id == user_id,
             Order.status.in_(("pending", "submitted")),
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         ).first()
         if not order:
             return None
 
-<<<<<<< HEAD
-        # Cancel on broker side
-        broker_order_id = getattr(order, 'broker_order_id', None)
-        if broker_order_id:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(
-                    self.broker.cancel_order(str(broker_order_id), order.symbol)
-                )
-            except RuntimeError:
-                pass  # No event loop; skip broker cancel in sync context
-=======
         if order.trade_mode == "live" and order.status == "submitted":
             broker_id = ""
             remark = order.remark or ""
@@ -723,7 +536,6 @@ class TradingEngine:
             if not result.success:
                 raise TradingEngineError(result.message or "券商撤单失败")
             order.remark = (order.remark or "") + f" | cancel:{result.message}"
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         order.status = "cancelled"
         order.updated_at = datetime.datetime.utcnow()
@@ -743,79 +555,126 @@ class TradingEngine:
         return [o.to_dict() for o in orders]
 
     def get_positions(self, db: Session, user_id: int) -> list:
-<<<<<<< HEAD
-        """Get current positions — syncs with broker if live, or uses DB."""
-        # If using live broker, could sync positions here
-        # For paper mode, positions are maintained in DB
-=======
         mode = self.get_user_mode(db, user_id)
         self.settle_t1_positions(db, user_id)
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         positions = db.query(PositionModel).filter(
             PositionModel.user_id == user_id,
             PositionModel.trade_mode == mode,
             PositionModel.quantity > 0,
         ).all()
 
-<<<<<<< HEAD
-        if not positions:
-            return []
-
-        symbols = [pos.symbol for pos in positions]
-        quotes_map = data_engine.batch_get_quotes(symbols)
-
-        result = []
-        for pos in positions:
-            quote = quotes_map.get(pos.symbol, {})
-            current_price = quote.get("current_price", pos.current_price or 0)
-            stock_name = quote.get("name", "") or data_engine.lookup_stock_name(pos.symbol)
-
-            pos.current_price = current_price
-            pos.market_value = round(pos.quantity * current_price, 2)
-=======
         symbols = list({p.symbol for p in positions if p.symbol})
         quote_map: dict = {}
         if symbols:
             try:
-                quote_map = data_engine.get_realtime_quotes_batch(symbols) or {}
+                quote_map = data_engine.batch_get_quotes(symbols) or {}
             except Exception:
                 quote_map = {}
+            if not quote_map:
+                try:
+                    quote_map = data_engine.get_realtime_quotes_batch(symbols) or {}
+                except Exception:
+                    quote_map = {}
 
+        # Realized PnL from sell trades (survives full-close + rebuy; row field alone does not)
+        realized_map: dict[tuple, float] = {}
+        if symbols:
+            from sqlalchemy import func
+
+            sell_rows = (
+                db.query(
+                    Trade.symbol,
+                    Trade.strategy_id,
+                    func.coalesce(func.sum(Trade.pnl), 0.0),
+                )
+                .filter(
+                    Trade.user_id == user_id,
+                    Trade.side == "sell",
+                    Trade.trade_mode == mode,
+                    Trade.symbol.in_(symbols),
+                )
+                .group_by(Trade.symbol, Trade.strategy_id)
+                .all()
+            )
+            for sym, sid, total in sell_rows:
+                realized_map[(sym, sid)] = float(total or 0)
+            # Also aggregate by symbol only (manual trades often have strategy_id=None
+            # while strategy fills use an id — sum all sells for the symbol as fallback)
+            sell_by_sym = (
+                db.query(Trade.symbol, func.coalesce(func.sum(Trade.pnl), 0.0))
+                .filter(
+                    Trade.user_id == user_id,
+                    Trade.side == "sell",
+                    Trade.trade_mode == mode,
+                    Trade.symbol.in_(symbols),
+                )
+                .group_by(Trade.symbol)
+                .all()
+            )
+            realized_by_symbol = {sym: float(total or 0) for sym, total in sell_by_sym}
+        else:
+            realized_by_symbol = {}
+
+        result = []
         for pos in positions:
+            quote = {}
             try:
-                quote = quote_map.get(pos.symbol)
+                quote = quote_map.get(pos.symbol) or {}
                 if not quote:
-                    quote = data_engine.get_realtime_quote(pos.symbol)
+                    quote = data_engine.get_realtime_quote(pos.symbol) or {}
                 pos.current_price = float(quote.get("current_price") or 0) or (
                     pos.current_price or pos.avg_cost
                 )
             except Exception:
                 pos.current_price = pos.current_price or pos.avg_cost
+                quote = {}
+
             pos.market_value = round(pos.quantity * pos.current_price, 2)
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
             pos.unrealized_pnl = round(
-                (current_price - pos.avg_cost) * pos.quantity, 2
+                (pos.current_price - pos.avg_cost) * pos.quantity, 2
             )
             pos.unrealized_pnl_pct = round(
-                (current_price - pos.avg_cost) / pos.avg_cost * 100, 2
+                (pos.current_price - pos.avg_cost) / pos.avg_cost * 100, 2
             ) if pos.avg_cost > 0 else 0
             pos.available_quantity = self.get_available_quantity(
                 db, pos.user_id, pos.symbol, pos.strategy_id, pos.trade_mode
             )
 
-            result.append(pos.to_dict(name=stock_name))
+            key = (pos.symbol, pos.strategy_id)
+            realized = realized_map.get(key)
+            if realized is None:
+                realized = realized_by_symbol.get(pos.symbol, float(pos.realized_pnl or 0))
+            pos.realized_pnl = round(float(realized or 0), 2)
+
+            pre_close = float(quote.get("pre_close") or 0)
+            if pre_close <= 0 and pos.current_price > 0:
+                # Fallback: derive from change_pct when quote lacks pre_close
+                chg = float(quote.get("change_pct") or 0)
+                if chg != 0 and chg != -100:
+                    pre_close = round(pos.current_price / (1 + chg / 100), 4)
+            day_pnl = (
+                round((pos.current_price - pre_close) * pos.quantity, 2)
+                if pre_close > 0
+                else 0.0
+            )
+            day_pnl_pct = (
+                round((pos.current_price - pre_close) / pre_close * 100, 2)
+                if pre_close > 0
+                else 0.0
+            )
+
+            row = pos.to_dict()
+            row["realized_pnl"] = pos.realized_pnl
+            row["pre_close"] = pre_close or None
+            row["day_pnl"] = day_pnl
+            row["day_pnl_pct"] = day_pnl_pct
+            result.append(row)
 
         db.commit()
         return result
 
     def get_account_summary(self, db: Session, user_id: int) -> dict:
         from app.models.user import User
-<<<<<<< HEAD
-        from app.models.trade import Trade
-        from sqlalchemy import func, case
-
-=======
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         user = db.query(User).filter(User.id == user_id).first()
         mode = self.get_user_mode(db, user_id)
         positions = self.get_positions(db, user_id)
@@ -823,24 +682,6 @@ class TradingEngine:
         total_market_value = sum(p["market_value"] for p in positions)
         total_unrealized_pnl = sum(p["unrealized_pnl"] for p in positions)
 
-<<<<<<< HEAD
-        agg = db.query(
-            func.coalesce(func.sum(case(
-                (Trade.side == "sell", Trade.pnl), else_=0
-            )), 0).label("total_realized_pnl"),
-            func.coalesce(func.sum(case(
-                (Trade.side == "buy", Trade.amount + Trade.commission), else_=0
-            )), 0).label("total_bought"),
-            func.coalesce(func.sum(case(
-                (Trade.side == "sell", Trade.amount - Trade.commission), else_=0
-            )), 0).label("total_sold"),
-        ).filter(Trade.user_id == user_id).first()
-
-        total_realized_pnl = float(agg.total_realized_pnl)
-        total_bought = float(agg.total_bought)
-        total_sold = float(agg.total_sold)
-        cash_balance = user.initial_cash - total_bought + total_sold if user else 0
-=======
         realized_trades = db.query(Trade).filter(
             Trade.user_id == user_id,
             Trade.side == "sell",
@@ -853,7 +694,6 @@ class TradingEngine:
             initial = float(user.initial_cash) if user else float(settings.DEFAULT_CASH)
         else:
             initial = cash_balance + total_market_value  # no fake baseline
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         total_equity = cash_balance + total_market_value
         total_pnl = total_realized_pnl + total_unrealized_pnl

@@ -36,7 +36,7 @@
               style="width: 130px"
               @blur="saveInlineCash(row)"
               @keyup.enter="saveInlineCash(row)"
-              ref="el => cashInputs[row.id] = el"
+              :ref="el => { if (el) cashInputs[row.id] = el }"
             />
           </template>
           <template v-else>
@@ -102,19 +102,13 @@
 import { ref, reactive, onMounted } from 'vue'
 import { adminApi } from '@/api/admin'
 import { ElMessage, ElMessageBox } from 'element-plus'
-<<<<<<< HEAD
 import { WarningFilled } from '@element-plus/icons-vue'
-=======
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
 const users = ref([])
 const dialogVisible = ref(false)
 const saving = ref(false)
-<<<<<<< HEAD
-const resetting = ref(false)
-=======
 const resettingId = ref(null)
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+const resetting = ref(false)
 const formRef = ref(null)
 const editingId = ref(null)
 const cashInputs = ref({})

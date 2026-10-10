@@ -25,13 +25,6 @@ def trading_day_start(now: datetime | None = None) -> datetime:
     return n.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def is_weekday(now: datetime | None = None) -> bool:
-    n = now or shanghai_now()
-    if n.tzinfo is not None:
-        n = n.astimezone(SHANGHAI)
-    return n.weekday() < 5
-
-
 def is_a_share_trading_session(now: datetime | None = None) -> bool:
     """True during continuous auction: 09:30–11:30 and 13:00–15:00 weekdays.
 

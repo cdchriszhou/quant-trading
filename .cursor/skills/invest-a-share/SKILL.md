@@ -20,12 +20,22 @@ This project skill keeps the useful checklists for **A-share short-hold** work.
 
 ## Technical checklist (short-hold)
 
+### A. Trend pullback (bull / normal tape)
 1. **Trend**: MA5 > MA10 > MA20, MA20 slope ≥ 0
 2. **Pullback**: price near MA20 (within ~2%), not broken
 3. **Volume**: contraction on pullback, expansion on reclaim/breakout
 4. **Higher lows**: recent swing low above prior swing low
 5. **Risk**: stop under structure or ATR multiple; target ≥ min RR × risk
-6. **Hard filters**: skip ST/*ST, suspended, limit-up/limit-down untradable, insufficient liquidity
+
+### B. Dip bounce (weak tape — 抄底反弹)
+1. **Washout**: 7–28% off 20d high, or 5d return ≤ -2% / below MA20
+2. **Structure**: still near MA60 (not >10% under) — medium-term not destroyed
+3. **Confirm**: bounce day (close ≥ prior close) + volume expand or close near day high
+4. **Risk**: stop under recent swing low; light size; take profit toward MA20 reclaim
+5. Never chase limit-down one-day spikes without confirmation
+
+### Shared hard filters
+Skip ST/*ST, suspended, limit-up/limit-down untradable, insufficient liquidity.
 
 ## Sector lens
 

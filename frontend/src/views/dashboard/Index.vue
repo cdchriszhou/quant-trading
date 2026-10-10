@@ -13,6 +13,7 @@
           平均股价 {{ envAvgPrice }}
           <span v-if="envMa20 !== '--'"> · MA20 {{ envMa20 }}（偏离 {{ envDistMa20 }}%）</span>
           <span v-if="envBullScore != null"> · 多/空分 {{ envBullScore }}/{{ envBearScore }}</span>
+          <span v-if="envExposureText"> · {{ envExposureText }}</span>
         </div>
         <div v-if="envMarketLine" style="font-size: 11px; color: #6b7280; margin-top: 2px">
           {{ envMarketLine }}
@@ -262,6 +263,7 @@ const envDistMa20 = ref('--')
 const envBullScore = ref(null)
 const envBearScore = ref(null)
 const envMarketLine = ref('')
+const envExposureText = ref('')
 const envCanTrade = ref(false)
 const envSignals = ref([])
 const envWarnings = ref([])
@@ -325,12 +327,20 @@ async function loadEnvStatus() {
     envState.value = d.env_state || 'neutral'
     envCanTrade.value = !!d.can_trade
     const msg = d.message || ''
-    if (envCanTrade.value) {
-      envStatusText.value = '多头市场'
-    } else if (d.env_state === 'bear') {
+    const checklist = d.checklist || {}
+    if (d.env_state === 'bear') {
       envStatusText.value = '空头市场'
     } else if (d.overheated || msg.includes('过热')) {
       envStatusText.value = '多头过热'
+    } else if (checklist.prolonged_pullback && !checklist.shallow_pullback) {
+      envStatusText.value = '弱势回踩'
+    } else if (checklist.shallow_pullback || msg.includes('回踩')) {
+      const days = d.days_below_ma20 || checklist.days_below_ma20 || 0
+      envStatusText.value = days >= 3 ? `回踩整理(${days}日)` : '回踩整理'
+    } else if (d.env_state === 'bull' && envCanTrade.value) {
+      envStatusText.value = '多头市场'
+    } else if (envCanTrade.value) {
+      envStatusText.value = msg.includes('谨慎') ? '谨慎偏多' : '谨慎开仓'
     } else {
       envStatusText.value = '震荡观望'
     }
@@ -339,6 +349,12 @@ async function loadEnvStatus() {
     envDistMa20.value = d.dist_ma20_pct != null ? Number(d.dist_ma20_pct).toFixed(1) : '--'
     envBullScore.value = d.bull_score != null ? d.bull_score : null
     envBearScore.value = d.bear_score != null ? d.bear_score : null
+    if (d.exposure_mult != null && d.can_trade) {
+      const pct = Math.round(Number(d.exposure_mult) * 100)
+      envExposureText.value = pct < 100 ? `建议敞口 ${pct}%` : ''
+    } else {
+      envExposureText.value = ''
+    }
     const mp = d.market_performance || {}
     const bits = []
     if (mp.index_summary) bits.push(mp.index_summary)
@@ -389,18 +405,12 @@ async function loadDashboard() {
     marketIndices.value = data.market?.indices || []
     dataSource.value = data.market?.data_source || 'realtime'
     stats.value = { total_strategies: data.total_strategies || 0, running_strategies: data.running_strategies || 0 }
-<<<<<<< HEAD
-    lastDashboardData = data  // save for chart renderer
-=======
     equityPoints.value = Array.isArray(data.equity_curve) ? data.equity_curve : []
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+    lastDashboardData = data
 
-    if (equityPoints.value.length && equityChartRef.value) {
+    if (equityChartRef.value) {
       await nextTick()
       renderChart()
-    } else if (equityChart) {
-      equityChart.dispose()
-      equityChart = null
     }
   } catch (err) {
     console.error('Dashboard error:', err)
@@ -408,39 +418,28 @@ async function loadDashboard() {
 }
 
 function renderChart() {
-<<<<<<< HEAD
-  // Reuse chart instance: only create once, update data with setOption
-  if (!equityChart) {
-    equityChart = echarts.init(equityChartRef.value)
-  }
-=======
-  if (!equityChartRef.value || !equityPoints.value.length) return
+  if (!equityChartRef.value) return
   if (equityChart) equityChart.dispose()
   equityChart = echarts.init(equityChartRef.value)
 
-  const dates = equityPoints.value.map((p) => p.date)
-  const values = equityPoints.value.map((p) => p.equity)
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+  let dates = []
+  let values = []
 
-  // Build chart from account data: use current total equity as the latest point
-  // and initial capital as the starting point for a realistic representation.
-  const account = (lastDashboardData && lastDashboardData.account) || {}
-  const initialCapital = account.initial_cash || 1000000
-  const currentEquity = account.total_equity || initialCapital
+  if (equityPoints.value.length) {
+    dates = equityPoints.value.map((p) => p.date)
+    values = equityPoints.value.map((p) => p.equity)
+  } else {
+    // Fallback: simple 2-point chart (initial → current)
+    const account = (lastDashboardData && lastDashboardData.account) || {}
+    const initialCapital = account.initial_cash || 1000000
+    const currentEquity = account.total_equity || initialCapital
+    const today = new Date()
+    const startDate = new Date(today)
+    startDate.setDate(startDate.getDate() - 30)
+    dates = [startDate.toLocaleDateString('zh-CN'), today.toLocaleDateString('zh-CN')]
+    values = [Math.round(initialCapital), Math.round(currentEquity)]
+  }
 
-  // Generate a simple 2-point chart (start -> current) if no history available
-  const dates = []
-  const values = []
-  const today = new Date()
-  const startDate = new Date(today)
-  startDate.setDate(startDate.getDate() - 30)
-  dates.push(startDate.toLocaleDateString('zh-CN'))
-  values.push(Math.round(initialCapital))
-  dates.push(today.toLocaleDateString('zh-CN'))
-  values.push(Math.round(currentEquity))
-
-  // Use notMerge=false for full option replacement on first render, then merge updates
-  const isFirstRender = !equityChart.getOption() || !equityChart.getOption().series
   equityChart.setOption({
     tooltip: { trigger: 'axis' },
     grid: { left: '0', right: '10', top: '10', bottom: '0', containLabel: true },
@@ -460,7 +459,7 @@ function renderChart() {
         ]),
       },
     }],
-  }, { notMerge: isFirstRender })
+  }, { notMerge: true })
 }
 
 onMounted(() => {

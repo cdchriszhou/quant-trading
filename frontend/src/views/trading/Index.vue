@@ -46,12 +46,8 @@
 </template>
 
 <script setup>
-<<<<<<< HEAD
-import { ref, reactive, onMounted, computed, watch } from 'vue'
-=======
 import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 import { tradingApi } from '@/api/trading'
 import { useAccountStore } from '@/stores/account'
 import { ElMessage } from 'element-plus'
@@ -92,20 +88,6 @@ async function loadAccount() {
   try {
     const res = await tradingApi.getAccount()
     account.value = res.data
-<<<<<<< HEAD
-  } catch (e) { console.error(e) }
-}
-
-async function loadSymbols() {
-  try {
-    const res = await marketApi.searchSymbols()
-    symbols.value = res.data || []
-  } catch (e) { console.error(e) }
-}
-
-onMounted(() => {
-  loadSymbols()
-=======
     if (res.data?.initial_cash) simCash.value = res.data.initial_cash
   } catch (e) {
     console.error(e)
@@ -124,14 +106,6 @@ async function saveSimCash() {
 
 onMounted(async () => {
   await accountStore.refresh()
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
   loadAccount()
 })
-
-// Auto-update price when symbol changes
-watch(() => form.symbol, (newSymbol) => {
-  if (newSymbol) {
-    marketApi.getQuote(newSymbol).then(r => { form.price = r.current_price }).catch(() => {})
-  }
-}, { immediate: true })
 </script>

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import datetime
 import time
 from typing import Optional
 
@@ -44,17 +45,7 @@ class MarketEnvEngine:
         self._cache_ts = now
         return result
 
-    def is_bullish(self) -> bool:
-        return self.check_environment().get("can_trade", False)
-
-    def is_bearish(self) -> bool:
-        return self.check_environment().get("env_state") == "bear"
-
-    def get_env_state(self) -> str:
-        return self.check_environment().get("env_state", "neutral")
-
     def get_avg_price_kline(self, count: int = 120) -> pd.DataFrame:
-<<<<<<< HEAD
         """Build a K-line DataFrame approximating the average stock price.
 
         Uses 上证指数 (000001.SH) K-line scaled to ~15 CNY (typical A-share price)
@@ -123,65 +114,64 @@ class MarketEnvEngine:
         df = pd.DataFrame(rows)
         df = df.sort_values("date").reset_index(drop=True)
         return df
-=======
-        from app.engine.data_engine import data_engine
-
-        try:
-            payload = data_engine.get_avg_price_kline(count)
-            rows = payload.get("data") if isinstance(payload, dict) else None
-            if rows:
-                df = pd.DataFrame(rows)
-                if not df.empty and "close" in df.columns:
-                    return df
-        except Exception as e:
-            print(f"[MarketEnv] avg price kline unavailable: {e}")
-
-        return pd.DataFrame(columns=["date", "open", "close", "high", "low", "volume"])
-
-    def _load_structure_frame(self, need: int) -> tuple[pd.DataFrame, str, list[str]]:
-        """Load OHLC for env scoring. Prefer avg-price; fallback 上证指数.
-
-        Returns (df, source_label, warnings).
-        """
-        warnings: list[str] = []
-        count = max(120, need + 10)
-        df = self.get_avg_price_kline(count)
-        if df is not None and len(df) >= need:
-            df = df.copy()
-            for col in ("open", "high", "low", "close", "volume"):
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-            df = df.dropna(subset=["close"])
-            df = self._drop_outlier_tip(df)
-            if len(df) >= need:
-                return df, "avg_price", warnings
-
-        warnings.append("平均股价K线不足，改用上证指数做结构代理")
-        try:
-            from app.engine.data_engine import data_engine
-            import datetime as _dt
-
-            end = _dt.datetime.now().strftime("%Y-%m-%d")
-            start = (_dt.datetime.now() - _dt.timedelta(days=max(260, need * 2))).strftime(
-                "%Y-%m-%d"
-            )
-            idx = data_engine.get_history_data("000001.SH", start, end)
-            if idx is not None and len(idx) >= need:
-                df = idx.copy()
-                for col in ("open", "high", "low", "close", "volume"):
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-                df = df.dropna(subset=["close"])
-                df = self._drop_outlier_tip(df)
-                if len(df) >= need:
-                    return df, "000001.SH", warnings
-        except Exception as e:
-            warnings.append(f"上证指数代理也失败: {e}")
-
-        return pd.DataFrame(), "none", warnings
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
     # ── Internal evaluation ─────────────────────────────────────────
+
+    def _load_structure_frame(self, need: int) -> tuple:
+        """Load daily structure series for MA / extension checks.
+
+        Returns (df|None, source, warnings).
+        Prefer cross-section average price; fall back to scaled index proxy.
+        """
+        warnings: list[str] = []
+        from app.engine.data_engine import data_engine
+
+        # 1) Real avg-price cross-section K-line
+        try:
+            payload = data_engine.get_avg_price_kline(max(need, 80))
+            rows = payload.get("data") if isinstance(payload, dict) else None
+            if rows and len(rows) >= max(20, need // 2):
+                df = pd.DataFrame(rows)
+                if "date" in df.columns:
+                    df = df.sort_values("date").reset_index(drop=True)
+                df = self._drop_outlier_tip(df)
+                if len(df) >= need:
+                    return df, "avg_price", warnings
+                warnings.append(f"平均股价K线仅 {len(df)} 根，需要 {need}")
+            else:
+                warnings.append("平均股价K线不足")
+        except Exception as e:
+            warnings.append(f"平均股价加载失败: {e}")
+
+        # 2) Index-scaled proxy (fast, shape-focused)
+        try:
+            df = self.get_avg_price_kline(max(need, 80))
+            if df is not None and len(df) >= need:
+                df = self._drop_outlier_tip(df)
+                if len(df) >= need:
+                    return df, "index_proxy", warnings
+            warnings.append("指数代理K线不足")
+        except Exception as e:
+            warnings.append(f"指数代理失败: {e}")
+
+        # 3) Configured index symbol history if set
+        idx = (getattr(settings, "AVG_PRICE_SYMBOL", "") or "").strip()
+        if idx:
+            try:
+                end = datetime.datetime.now().strftime("%Y-%m-%d")
+                start = (datetime.datetime.now() - datetime.timedelta(days=need * 3)).strftime("%Y-%m-%d")
+                hdf = data_engine.get_history_data(idx, start, end)
+                if hdf is not None and len(hdf) >= need:
+                    df = hdf.copy()
+                    if "date" in df.columns:
+                        df = df.sort_values("date").reset_index(drop=True)
+                    df = self._drop_outlier_tip(df)
+                    if len(df) >= need:
+                        return df, f"index:{idx}", warnings
+            except Exception as e:
+                warnings.append(f"配置指数 {idx} 失败: {e}")
+
+        return None, "none", warnings
 
     def _evaluate_environment(self) -> dict:
         need = max(settings.MARKET_ENV_MA_PERIOD + 5, 65)
@@ -222,6 +212,7 @@ class MarketEnvEngine:
         vol_ma = self._f(latest["vol_ma20"]) or 1.0
 
         dist_ma20 = (avg_price - ma20) / ma20 if ma20 > 0 else 0.0
+        dist_abs = abs(dist_ma20)
         above_ma20 = avg_price > ma20 > 0
         above_ma60 = avg_price > ma60 > 0
         ma20_rising = ma20_slope >= 0
@@ -263,18 +254,59 @@ class MarketEnvEngine:
             "above_ma60": above_ma60,
             "vol_healthy": vol_healthy,
             "higher_low": higher_low,
-            "not_overextended": dist_ma20 <= max_ext,
+            "not_overextended": (dist_abs <= max_ext) if above_ma20 else True,
             "index_ok": index_bias != "bear",
             "breadth_ok": breadth_bias != "bear",
+            "shallow_pullback": False,  # filled after score block
         }
 
         # ── 打分（多头 / 空头）──
+        # Skills alignment (uptrend-analyzer / market-env):
+        #   shallow dip below MA20 with rising MA20 ≠ structural bear.
         bull_pts = 0.0
         bear_pts = 0.0
+        shallow_pullback = (
+            not above_ma20
+            and 0 < dist_abs <= 0.025
+            and ma20_rising
+            and bull_stack
+            and not bear_stack
+        )
+
+        # Consecutive sessions below MA20 (durable pullback / failed reclaim)
+        days_below_ma20 = 0
+        for i in range(len(df) - 1, max(ma_period - 1, len(df) - 12) - 1, -1):
+            c_i = self._f(df["close"].iloc[i])
+            m_i = self._f(df["ma20"].iloc[i])
+            if m_i > 0 and c_i < m_i:
+                days_below_ma20 += 1
+            else:
+                break
+
+        # Prolonged break (>4 sessions) without reclaim → no longer "shallow"
+        prolonged_pullback = False
+        if shallow_pullback and days_below_ma20 >= 5:
+            shallow_pullback = False
+            prolonged_pullback = True
+            warnings.append(
+                f"跌破 MA20 已连续 {days_below_ma20} 日未收回，回踩升为弱势整理（不再按浅度回踩）"
+            )
+        elif shallow_pullback and days_below_ma20 >= 3:
+            prolonged_pullback = True  # still shallow label, but tighter exposure
+
+        checklist["shallow_pullback"] = shallow_pullback
+        checklist["days_below_ma20"] = days_below_ma20
+        checklist["prolonged_pullback"] = prolonged_pullback
 
         if above_ma20:
             bull_pts += 18
             signals.append("平均股价站稳 MA20")
+        elif shallow_pullback:
+            # Mild break: treat as pullback zone (dip), not trend failure
+            bear_pts += 6
+            bull_pts += 6
+            signals.append(f"浅度回踩 MA20（偏离 {dist_abs * 100:.1f}%）— 结构未转空")
+            warnings.append("平均股价短暂跌破 MA20（回踩）")
         else:
             bear_pts += 16
             warnings.append("平均股价跌破 MA20")
@@ -324,23 +356,23 @@ class MarketEnvEngine:
             warnings.append("近端低点下移，结构转弱")
 
         # 伸展 / 过热：离 MA20 太远则扣多头分，并可能禁止开仓
-        overheated = dist_ma20 > max_ext
-        caution_heat = caution_ext < dist_ma20 <= max_ext
+        overheated = dist_abs > max_ext and above_ma20
+        caution_heat = above_ma20 and caution_ext < dist_abs <= max_ext
         if overheated:
             bull_pts -= 22
             warnings.append(
-                f"平均股价较 MA20 偏离 {dist_ma20 * 100:.1f}%（>{max_ext * 100:.0f}%），过热追高风险"
+                f"平均股价较 MA20 偏离 {dist_abs * 100:.1f}%（>{max_ext * 100:.0f}%），过热追高风险"
             )
         elif caution_heat:
             bull_pts -= 8
             warnings.append(
-                f"平均股价较 MA20 偏离 {dist_ma20 * 100:.1f}%，追高需谨慎"
+                f"平均股价较 MA20 偏离 {dist_abs * 100:.1f}%，追高需谨慎"
             )
-        elif 0 <= dist_ma20 <= caution_ext and above_ma20:
+        elif 0 <= dist_abs <= caution_ext and above_ma20:
             bull_pts += 8
-            signals.append(f"回踩/贴近 MA20 区（偏离 {dist_ma20 * 100:.1f}%）")
+            signals.append(f"回踩/贴近 MA20 区（偏离 {dist_abs * 100:.1f}%）")
 
-        if drawdown > 0.08 and not above_ma20:
+        if drawdown > 0.08 and not above_ma20 and not shallow_pullback:
             bear_pts += 6
             warnings.append(f"自20日高点回撤 {drawdown * 100:.1f}%")
 
@@ -350,10 +382,17 @@ class MarketEnvEngine:
                 f"主要指数偏多（{market_perf.get('index_summary') or '多指数确认'}）"
             )
         elif index_bias == "bear":
-            bear_pts += 12
-            warnings.append(
-                f"主要指数偏弱（{market_perf.get('index_summary') or '指数下跌'}）"
-            )
+            # Intraday tape weakness — softer when structure is intact pullback
+            if shallow_pullback:
+                bear_pts += 6
+                warnings.append(
+                    f"当日指数偏弱（{market_perf.get('index_summary') or '指数下跌'}），属回踩日情绪"
+                )
+            else:
+                bear_pts += 12
+                warnings.append(
+                    f"主要指数偏弱（{market_perf.get('index_summary') or '指数下跌'}）"
+                )
         elif index_bias == "mixed":
             bear_pts += 4
             warnings.append(
@@ -367,10 +406,16 @@ class MarketEnvEngine:
                 f"板块赚钱效应偏强（{market_perf.get('breadth_summary') or ''}）".rstrip("（）")
             )
         elif breadth_bias == "bear":
-            bear_pts += 14
-            warnings.append(
-                f"板块普跌/涨少跌多（{market_perf.get('breadth_summary') or ''}）".rstrip("（）")
-            )
+            if shallow_pullback:
+                bear_pts += 7
+                warnings.append(
+                    f"当日赚钱效应偏弱（{market_perf.get('breadth_summary') or ''}）".rstrip("（）")
+                )
+            else:
+                bear_pts += 14
+                warnings.append(
+                    f"板块普跌/涨少跌多（{market_perf.get('breadth_summary') or ''}）".rstrip("（）")
+                )
         elif breadth_bias == "mixed":
             bear_pts += 3
             warnings.append(
@@ -380,19 +425,87 @@ class MarketEnvEngine:
         bull_pts = max(0.0, bull_pts)
         bear_pts = max(0.0, bear_pts)
 
-        # 市场表现过弱时，即使均线多头也不开仓
+        # Tape weak today (indices/breadth) — not the same as structural bear
         market_weak = index_bias == "bear" or breadth_bias == "bear"
 
-        # ── 状态裁决 ──
-        if bear_stack or (bear_pts >= 40 and bear_pts > bull_pts + 8):
+        # Structural bear: full MA stack broken, or deep MA failure without
+        # live breadth/index support. Avg-price lagging while indices+breadth
+        # are green is rotation — still allow selective opens (user complaint:
+        # "每天都有上涨空间的股票").
+        ma20_falling_hard = (not ma20_rising) and (ma20_slope_pct <= -0.15)
+        tape_alive = index_bias == "bull" or breadth_bias == "bull"
+        structural_bear = bool(
+            bear_stack
+            or (
+                not above_ma20
+                and not above_ma60
+                and ma20_falling_hard
+                and dist_abs > 0.02
+                and not tape_alive
+            )
+            or (
+                bear_pts >= 62
+                and bear_pts > bull_pts + 20
+                and not above_ma60
+                and not shallow_pullback
+                and not tape_alive
+                and not (bull_stack and ma20_rising)
+            )
+        )
+
+        # ── 状态裁决（结构优先；单日普跌 ≠ 空头市场）──
+        if structural_bear:
             env_state = "bear"
             can_trade = False
             message = "空头市场 — 禁止开仓"
+            exposure_mult = 0.0
+        elif shallow_pullback:
+            # uptrend-analyzer: intact uptrend + weak day → Reduced/Defensive exposure
+            env_state = "neutral"
+            can_trade = True
+            exposure_mult = 0.40 if days_below_ma20 >= 3 else 0.55
+            message = (
+                f"回踩 MA20 — 允许谨慎开仓/抄底精选（建议敞口 {int(exposure_mult * 100)}%）"
+            )
+            warnings.insert(
+                0,
+                "均线多头且 MA20 仍上行，仅浅度跌破属回踩；宜缩小仓位、精选个股，不宜定性空头",
+            )
+            if days_below_ma20 >= 3:
+                warnings.insert(
+                    0,
+                    f"已连续 {days_below_ma20} 日在 MA20 下方，自动/推荐仓位进一步收紧",
+                )
+        elif not above_ma20 and tape_alive and not bear_stack:
+            # Structure lagging the tape — classic "index up, avg lag" day
+            env_state = "neutral"
+            can_trade = True
+            exposure_mult = 0.50 if breadth_bias == "bull" else 0.40
+            message = (
+                f"结构偏弱但当日赚钱效应仍在 — 允许精选相对强势"
+                f"（建议敞口 {int(exposure_mult * 100)}%）"
+            )
+            warnings.insert(
+                0,
+                "平均股价仍在均线下方，但指数/板块已现赚钱效应；宜跟强势板块，忌抄飞刀",
+            )
+        elif (prolonged_pullback or (not above_ma20 and days_below_ma20 >= 3)) and not structural_bear:
+            env_state = "neutral"
+            can_trade = True
+            exposure_mult = 0.30 if (not ma20_rising or days_below_ma20 >= 5) else 0.40
+            message = (
+                f"弱势回踩 — 允许极轻仓精选相对强势/抄底（建议敞口 {int(exposure_mult * 100)}%）"
+            )
+            warnings.insert(
+                0,
+                "指数结构偏弱但未空头排列，短线仍有板块轮动；缩小仓位、只做相对强势或确认反弹",
+            )
         elif market_weak and above_ma20 and bull_stack and not overheated:
             env_state = "neutral"
-            can_trade = False
-            message = "结构偏多但市场表现偏弱 — 暂停开仓"
-            warnings.insert(0, "均线结构尚可，但指数/板块赚钱效应不足，不宜新开仓")
+            can_trade = True
+            exposure_mult = 0.60
+            message = "结构偏多但当日偏弱 — 允许谨慎开仓"
+            warnings.insert(0, "均线结构尚可，当日指数/板块偏弱，建议缩小仓位、提高个股门槛")
         elif (
             above_ma20
             and ma20_rising
@@ -407,30 +520,35 @@ class MarketEnvEngine:
         ):
             env_state = "bull"
             can_trade = True
+            exposure_mult = 1.0
             message = "多头市场 — 允许开仓"
         elif overheated and above_ma20 and bull_stack:
             env_state = "neutral"
             can_trade = False
+            exposure_mult = 0.0
             message = "多头过热 — 暂停追高开仓"
             if "过热" not in "".join(warnings):
-                warnings.insert(0, "趋势偏多但偏离均线过大，执行器与推荐将锁定新开仓")
+                warnings.insert(0, "趋势偏多但偏离均线过大，自动执行器暂停追高开仓（人工推荐仍可精选回踩）")
         elif (
-            # 谨慎开仓：结构未坏、未过热、市场未明显走弱（避免数据缺失/中性就一刀切）
-            above_ma20
+            (above_ma20 or shallow_pullback)
             and not overheated
             and not vol_panic
-            and not market_weak
-            and bull_pts >= 38
-            and bull_pts >= bear_pts
-            and checklist.get("index_ok", True)
+            and bull_pts >= 36
+            and (
+                bull_pts + 8 >= bear_pts
+                or shallow_pullback
+                or checklist.get("index_ok", True)
+            )
         ):
             env_state = "neutral"
             can_trade = True
-            message = "震荡偏多 — 允许谨慎开仓"
+            exposure_mult = 0.70
+            message = "震荡偏多/回踩 — 允许谨慎开仓"
             warnings.insert(0, "未达强多头标准，建议缩小仓位、提高个股结构门槛")
         else:
             env_state = "neutral"
             can_trade = False
+            exposure_mult = 0.0
             message = "震荡/观望 — 暂停开仓"
 
         if load_warnings:
@@ -447,6 +565,7 @@ class MarketEnvEngine:
         return {
             "env_state": env_state,
             "can_trade": can_trade,
+            "exposure_mult": round(float(exposure_mult), 2),
             "avg_price": round(avg_price, 2),
             "ma20": round(ma20, 2),
             "ma20_slope": round(ma20_slope, 4),
@@ -463,6 +582,7 @@ class MarketEnvEngine:
             "confidence": confidence,
             "overheated": overheated,
             "checklist": checklist,
+            "days_below_ma20": days_below_ma20,
             "index_bias": index_bias,
             "breadth_bias": breadth_bias,
             "market_performance": market_perf,
@@ -505,6 +625,7 @@ class MarketEnvEngine:
         base.update({
             "env_state": env_state,
             "can_trade": can_trade,
+            "exposure_mult": 0.5 if can_trade else 0.0,
             "index_bias": index_bias,
             "breadth_bias": breadth_bias,
             "market_performance": market_perf or {},
@@ -531,6 +652,7 @@ class MarketEnvEngine:
         return {
             "env_state": "neutral",
             "can_trade": False,
+            "exposure_mult": 0.0,
             "avg_price": 0.0,
             "ma20": 0.0,
             "ma20_slope": 0.0,
@@ -638,17 +760,23 @@ class MarketEnvEngine:
 
                 if sec_ratio >= 0.55 and sec_avg > 0.2 and (stock_ratio is None or stock_ratio >= 0.5):
                     out["breadth_bias"] = "bull"
-                elif sec_ratio <= 0.4 or sec_avg < -0.3 or (stock_ratio is not None and stock_ratio < 0.4):
+                elif (
+                    sec_ratio <= 0.32
+                    and sec_avg < -0.45
+                    and (stock_ratio is not None and stock_ratio < 0.32)
+                ):
                     out["breadth_bias"] = "bear"
+                elif (
+                    sec_ratio <= 0.45
+                    or sec_avg < -0.15
+                    or (stock_ratio is not None and stock_ratio < 0.42)
+                ):
+                    out["breadth_bias"] = "mixed"
                 else:
                     out["breadth_bias"] = "mixed"
         except Exception as e:
             print(f"[MarketEnv] market performance snapshot failed: {e}")
         return out
-
-    def _index_bias(self) -> str:
-        """Backward-compatible wrapper."""
-        return self._market_performance().get("index_bias") or "unknown"
 
     @staticmethod
     def _drop_outlier_tip(df: pd.DataFrame, max_day_move: float = 0.05) -> pd.DataFrame:

@@ -68,6 +68,7 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'Reports' })
 import { ref, computed, onMounted } from 'vue'
 import { reportsApi } from '@/api/reports'
 import { tradingApi } from '@/api/trading'
@@ -82,7 +83,6 @@ const account = ref(null)
 const perfItems = computed(() => {
   if (!performance.value) return []
   const p = performance.value
-  const a = account.value || {}
   return [
     { label: '总交易次数', value: p.total_trades },
     { label: '买入次数', value: p.buy_trades },
@@ -105,17 +105,27 @@ const accountItems = computed(() => {
 })
 
 async function load() {
-  try {
-    const [tRes, pRes, aRes] = await Promise.all([
-      reportsApi.getTrades(),
-      reportsApi.getPerformance(),
-      tradingApi.getAccount(),
-    ])
-    trades.value = tRes.data || []
+  const [tRes, pRes, aRes] = await Promise.allSettled([
+    reportsApi.getTrades(),
+    reportsApi.getPerformance(),
+    tradingApi.getAccount(),
+  ])
+  if (tRes.status === 'fulfilled') {
+    trades.value = tRes.value.data || []
     await ensureStockNames(trades.value.map((t) => t.symbol))
-    performance.value = pRes.data
-    account.value = aRes.data
-  } catch (e) { console.error(e) }
+  } else {
+    console.error(tRes.reason)
+  }
+  if (pRes.status === 'fulfilled') {
+    performance.value = pRes.value.data
+  } else {
+    console.error(pRes.reason)
+  }
+  if (aRes.status === 'fulfilled') {
+    account.value = aRes.value.data
+  } else {
+    console.error(aRes.reason)
+  }
 }
 
 function exportTrades() {

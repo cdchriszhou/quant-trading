@@ -5,8 +5,8 @@
       :closable="false"
       show-icon
       style="margin-bottom: 14px"
-      title="重要说明：宁缺毋滥，不保证盈利"
-      description="每只票均按真实日K结构筛选（趋势/回踩MA20/量能/低点抬高/盈亏比）。达不到结构门槛不会凑数推荐；止损止盈仅供风控参考。"
+      title="重要说明：牛熊都可荐，宁缺毋滥，不保证盈利"
+      description="指数弱不等于没票：相对强势 + 趋势回踩 + 确认后的抄底。达不到结构/盈亏比门槛不会凑数；止损止盈仅供风控参考。"
     />
 
     <el-card shadow="never" style="margin-bottom: 14px">
@@ -169,16 +169,34 @@
       </el-form>
 
       <el-alert
-        v-if="meta && meta.open_allowed === false"
+        v-if="meta?.market_forecast"
+        type="success"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+        :title="forecastTitle"
+        :description="forecastDesc"
+      />
+      <el-alert
+        v-if="meta && meta.open_policy === 'defensive'"
         type="warning"
         :closable="false"
         show-icon
         style="margin-bottom: 12px"
-        :title="meta.market_env?.message || '大盘环境不适合新开仓'"
-        :description="meta.empty_reason || '已与策略执行器对齐：空头/震荡时锁定买入推荐。'"
+        :title="meta.market_env?.message || '大盘偏弱/过热 — 防御精选'"
+        :description="defensiveDesc"
       />
       <el-alert
-        v-else-if="meta?.strategy_health?.strategies"
+        v-else-if="meta && meta.open_policy === 'cautious'"
+        type="info"
+        :closable="false"
+        show-icon
+        style="margin-bottom: 12px"
+        :title="meta.market_env?.message || '震荡偏多 — 谨慎精选'"
+        description="已略提高结构分与盈亏比门槛，并缩小建议单票仓位；自动执行器仍可按环境拒绝开仓。"
+      />
+      <el-alert
+        v-if="meta?.strategy_health?.strategies"
         type="info"
         :closable="false"
         show-icon
@@ -288,9 +306,29 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="匹配策略" width="150">
+          <el-table-column label="匹配策略" width="160">
             <template #default="{ row }">
               <div style="font-weight: 600; color: #1a1a1a">{{ row.suggested_strategy?.name || '—' }}</div>
+              <el-tag
+                v-if="row.setup_type === 'dip_bounce'"
+                size="small"
+                type="warning"
+                style="margin: 2px 0"
+              >抄底反弹</el-tag>
+              <el-tag
+                v-else-if="row.setup_type === 'rs_hold'"
+                size="small"
+                type="danger"
+                effect="plain"
+                style="margin: 2px 0"
+              >相对强势</el-tag>
+              <el-tag
+                v-else-if="row.setup_label"
+                size="small"
+                type="success"
+                effect="plain"
+                style="margin: 2px 0"
+              >{{ row.setup_label }}</el-tag>
               <el-tag
                 v-if="row.strategy_health_status"
                 size="small"
@@ -449,16 +487,25 @@ const rrExplain = computed(() => {
 })
 
 const envText = computed(() => {
-  const s = meta.value?.market_env?.env_state
-  if (s === 'bull') return '多头'
-  if (s === 'bear') return '空头'
+  const e = meta.value?.market_env || {}
+  const msg = e.message || ''
+  if (e.shallow_pullback) return e.days_below_ma20 >= 3 ? `回踩(${e.days_below_ma20}日)` : '回踩'
+  if (msg.includes('赚钱效应')) return '结构弱·有赚钱效应'
+  if (e.env_state === 'bull') return '多头'
+  if (e.env_state === 'bear') return '空头'
   return '震荡'
 })
 const openPolicyText = computed(() => {
-  if (meta.value?.open_allowed === false || meta.value?.open_policy === 'blocked') return '锁定开仓'
+  const p = meta.value?.open_policy
+  if (p === 'defensive') return '防御精选'
+  if (p === 'cautious') return meta.value?.prefer_dip ? '回踩抄底优先' : '谨慎精选（含相对强势）'
+  if (p === 'blocked') return '锁定开仓'
+  if (meta.value?.open_allowed === false) return '执行器暂停'
   return '允许开仓'
 })
 const envColor = computed(() => {
+  const p = meta.value?.open_policy
+  if (p === 'defensive') return '#f59e0b'
   const s = meta.value?.market_env?.env_state
   if (s === 'bull') return '#ef4444'
   if (s === 'bear') return '#10b981'
@@ -473,14 +520,47 @@ const healthSummary = computed(() => {
   })
   return parts.join('；') || '暂无策略健康度'
 })
+const defensiveDesc = computed(() => {
+  const envMsg = meta.value?.market_env?.message || ''
+  const base = meta.value?.prefer_dip
+    ? '回踩日优先抄底反弹精选；并保留相对强势与趋势回踩，仓位按展望收紧。'
+    : '弱市仍推荐有上涨空间的结构：相对强势 + 趋势回踩 + 确认后抄底；不追涨停，宁缺毋滥。'
+  const stats = meta.value?.scan_stats || {}
+  const mix = ` 候选 相对强势 ${stats.rs_candidates ?? 0} / 抄底 ${stats.dip_candidates ?? 0} / 趋势 ${stats.trend_candidates ?? 0}。`
+  const extra = meta.value?.empty_reason ? ` ${meta.value.empty_reason}` : ''
+  const exec = meta.value?.open_allowed === false ? ' 自动策略当前暂停新开仓（推荐仍可选）。' : ''
+  return `${envMsg ? envMsg + '。' : ''}${base}${mix}${exec}${extra}`
+})
+const forecastTitle = computed(() => {
+  const f = meta.value?.market_forecast
+  if (!f) return '短线市场展望'
+  return `短线展望 ${f.forecast_score ?? '—'}/100 · ${f.message || f.zone || ''}`
+})
+const forecastDesc = computed(() => {
+  const f = meta.value?.market_forecast
+  const e = meta.value?.market_env || {}
+  if (!f) return ''
+  const envExp = e.exposure_mult != null ? Number(e.exposure_mult) : null
+  const fExp = Number(f.exposure_mult || 0)
+  const parts = [
+    envExp != null
+      ? `环境敞口 ${(envExp * 100).toFixed(0)}% / 展望 ${(fExp * 100).toFixed(0)}%`
+      : `敞口建议 ${(fExp * 100).toFixed(0)}%`,
+    `见顶风险 ${f.top_risk ?? '—'}`,
+    `派发日 ${f.distribution_days_25 ?? 0}`,
+    `偏向 ${f.horizon_bias || '—'}`,
+  ]
+  if (meta.value?.size_mult != null) {
+    parts.unshift(`实际仓位系数 ${(Number(meta.value.size_mult) * 100).toFixed(0)}%`)
+  }
+  const sig = (f.signals || []).slice(0, 2).join('；')
+  return sig ? `${parts.join(' · ')}。${sig}` : parts.join(' · ')
+})
 const emptyHint = computed(() => {
   if (!hasFetched.value) {
     return '请先设置筛选条件，再点击右上角「刷新推荐」'
   }
   if (meta.value?.empty_reason) return meta.value.empty_reason
-  if (meta.value?.open_allowed === false) {
-    return '大盘环境与执行器一致，暂不给出新开仓推荐'
-  }
   return '暂无匹配当前资金的候选，可调高单票仓位、降低盈亏比后再点「刷新推荐」'
 })
 

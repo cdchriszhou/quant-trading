@@ -125,30 +125,21 @@ class SectorEngine:
         all_stocks = []
         seen = set()
 
-<<<<<<< HEAD
-        # Build industry → stock mapping once
-        industry_map = data_engine._build_industry_map() if hasattr(data_engine, "_build_industry_map") else {}
-
-        # Build sector_code → sector_name lookup dict (O(1) instead of O(n*m))
-        ranking = self.rank_sectors()
-        sector_name_map = {r["sector_code"]: r["sector_name"] for r in ranking}
-
-        for sc in sector_codes:
-            sector_name = sector_name_map.get(sc)
-            if not sector_name:
-=======
         for sc in sector_codes:
             try:
                 rows = data_engine.get_sector_stocks(sc, count=limit_per_sector) or []
             except Exception as e:
                 print(f"[SectorEngine] get_sector_stocks({sc}) failed: {e}")
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                 continue
+            added = 0
             for row in rows:
+                if added >= limit_per_sector:
+                    break
                 sym = row.get("code") if isinstance(row, dict) else row
                 if sym and sym not in seen:
                     all_stocks.append(sym)
                     seen.add(sym)
+                    added += 1
 
         return all_stocks
 
@@ -205,20 +196,32 @@ class SectorEngine:
 
             kline = sector_kline_map.get(code)
             if kline is None or len(kline) < 60:
-                # Insufficient data — score as neutral and continue
+                # No board kline (common for Sina new_* fallback): score from snapshot
+                change = float(sector.get("change_pct") or 0)
+                up = int(sector.get("up_count") or 0)
+                total = int(sector.get("total_count") or 0)
+                breadth = (up / total) if total > 0 else 0.5
+                score = round(
+                    max(0.0, min(100.0, 50 + change * 4 + (breadth - 0.5) * 30)),
+                    1,
+                )
                 results.append({
                     "sector_code": code,
                     "sector_name": name,
-                    "strength_score": 50.0,
+                    "strength_score": score,
                     "rank": idx + 1,
                     "ma_alignment": "unknown",
                     "ma5": 0, "ma10": 0, "ma20": 0, "ma60": 0,
-                    "change_20d": sector.get("change_pct", 0),
-                    "limit_up_count": sector.get("up_count", 0),
+                    "change_20d": change,
+                    "limit_up_count": up,
                     "leading_stock": sector.get("leading_stock", ""),
                     "leading_stock_code": sector.get("leading_stock_code", ""),
-                    "is_blacklisted": True,
-                    "details": {"reason": "K-line 数据不足"},
+                    # Soft blacklist only when clearly weak — keep usable in weak tape
+                    "is_blacklisted": change < -2.0 or (total > 0 and breadth < 0.25),
+                    "details": {
+                        "reason": "无板块K线，按当日涨跌/涨跌家数近似评分",
+                        "source": sector.get("source") or "",
+                    },
                 })
                 continue
 
@@ -356,16 +359,9 @@ class SectorEngine:
     def _get_sector_kline(sector_code: str, count: int = 80) -> list | None:
         """Fetch K-line data for a sector/board index from Tencent.
 
-<<<<<<< HEAD
-        Sector K-line uses the same Tencent K-line API with board-specific codes.
-        Falls back to simulated data when API is unavailable.
-
-        Uses a shorter timeout (5s) and faster rate limit (0.1s) since Tencent's
-        board K-line API is more permissive than the quote API.
-=======
-        Tencent board codes look like ``pt01801081`` (NOT ``bkpt...``).
-        Falls back to None when API is unavailable (no simulated data).
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+        Sector K-line uses the same Tencent K-line API with board-specific codes
+        (bk* / pt*). Sina industry nodes (new_*) have no Tencent kline param —
+        skip them to avoid noisy ``param error`` storms during warmup.
         """
         from app.engine.data_engine import data_engine
 
@@ -374,34 +370,6 @@ class SectorEngine:
         if cached:
             return cached
 
-<<<<<<< HEAD
-        # Try fetching from Tencent using the board code
-        tcode = f"bk{sector_code}" if not sector_code.startswith("bk") else sector_code
-        url = (
-            f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-            f"?param={tcode},day,,,{count},qfq"
-        )
-        try:
-            # Faster rate limit for board K-line API (more generous than quote API)
-            data_engine._rate_limit(min_interval=0.1)
-            resp = data_engine.http.get(url, timeout=5)
-            data = resp.json()
-            if isinstance(data, dict) and data.get("code") == 0:
-                stock_data = data.get("data", {}).get(tcode, {})
-                klines_raw = stock_data.get("qfqday") or stock_data.get("day") or []
-                if klines_raw:
-                    result = []
-                    for row in klines_raw:
-                        if len(row) >= 6:
-                            result.append({
-                                "date": str(row[0])[:10],
-                                "open": round(float(row[1]), 2),
-                                "close": round(float(row[2]), 2),
-                                "high": round(float(row[3]), 2),
-                                "low": round(float(row[4]), 2),
-                                "volume": int(float(row[5])),
-                            })
-=======
         # Normalize: strip mistaken ``bk`` prefix before ``pt`` codes
         code = (sector_code or "").strip()
         if code.startswith("bkpt"):
@@ -410,6 +378,10 @@ class SectorEngine:
             # keep classic bk0475-style; only strip when it was wrongly prefixed
             pass
         if not code:
+            return None
+
+        # Sina Market_Center nodes are not valid Tencent kline symbols
+        if code.startswith("new_"):
             return None
 
         stock = data_engine._fetch_tencent_kline_payload(code, "day", count, adjust="qfq")
@@ -435,11 +407,12 @@ class SectorEngine:
                             "volume": int(float(row[5])),
                         })
                 if result:
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                     data_engine._cache_set(cache_key, result)
                     return result
 
-        print(f"[SectorEngine] Real sector kline unavailable for {sector_code}")
+        # Only log for codes that look like Tencent boards (avoid new_* spam)
+        if code.startswith(("bk", "pt")):
+            print(f"[SectorEngine] Real sector kline unavailable for {sector_code}")
         return None
 
 

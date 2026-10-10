@@ -27,6 +27,25 @@ class NotificationEngine:
     def __init__(self):
         self._connections: dict[int, list] = {}  # user_id -> [websocket, ...]
         self.broadcast = self._default_broadcast
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
+        """Remember the FastAPI event loop so worker threads can push WS safely."""
+        self._loop = loop
+
+    def _schedule_broadcast(self, user_id: int, data: dict) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.broadcast(user_id, data))
+            return
+        except RuntimeError:
+            pass
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(self.broadcast(user_id, data), loop)
+            except Exception as e:
+                logger.warning(f"[Notify] Broadcast schedule failed: {e}")
 
     # ── WebSocket connection management ───────────────────────────
 
@@ -80,13 +99,8 @@ class NotificationEngine:
             db.refresh(notif)
             data = notif.to_dict()
 
-            # Broadcast to connected user(s) — schedule on running event loop
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self.broadcast(user_id, data))
-            except RuntimeError:
-                # No running event loop (e.g. called from sync context)
-                pass
+            # Broadcast: works from async loop OR worker thread (strategy ticks)
+            self._schedule_broadcast(user_id, data)
 
             return data
         except Exception as e:

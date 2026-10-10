@@ -423,22 +423,6 @@ class StrategyEngine:
         )
 
         # ── 卖出信号（规则9-12）──
-<<<<<<< HEAD
-        # 追踪持仓状态和入场价 — 先计算 sell_signal，再用它来重置 position 状态
-        # 这样避免卖出后下一根K线仍错误地处于持仓状态
-        buy_signals_arr = result["buy_signal"].to_numpy()
-        sell_signals_arr = np.zeros(n, dtype=bool)  # will be filled after position tracking
-        close_arr = result["close"].to_numpy()
-        high_arr = result["high"].to_numpy()
-
-        in_position_arr = np.zeros(n, dtype=np.int8)
-        entry_price_arr = np.full(n, np.nan)
-        highest_arr = np.full(n, np.nan)
-        days_in_trade_arr = np.zeros(n, dtype=np.int32)
-
-        in_pos = 0
-        entry_price_val = np.nan
-=======
         # 单遍扫描持仓生命周期：买入后跟踪，触发卖出则复位，允许下一轮交易
         result["in_position"] = 0
         result["entry_price"] = np.nan
@@ -466,56 +450,10 @@ class StrategyEngine:
         in_pos = 0
         entry_price_val = np.nan
         entry_idx_val = np.nan
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         highest_val = np.nan
         days_in_pos = 0
 
         for i in range(n):
-<<<<<<< HEAD
-            # ── Check exit conditions for current position ──
-            if in_pos == 1:
-                # Hard stop-loss
-                stop_hit = close_arr[i] < entry_price_val * (1 - stop_loss)
-                # MA stop
-                ma20_val = result["ma20"].iloc[i] if not pd.isna(result["ma20"].iloc[i]) else 0
-                ma_stop = ma20_val > 0 and close_arr[i] < ma20_val * (1 - ma_stop_buf)
-                # Time stop 1: N days and profit < threshold
-                time1 = days_in_pos >= time_stop_d1 and (close_arr[i] - entry_price_val) / entry_price_val < time_profit_1
-                # Time stop 2: N days and below highest
-                time2 = days_in_pos >= time_stop_d2 and close_arr[i] < highest_val
-                # Trailing stop
-                trail_cost = highest_val > entry_price_val * (1 + trail_1) and close_arr[i] < entry_price_val
-                trail_ma5 = (highest_val > entry_price_val * (1 + trail_2) and
-                             not pd.isna(result["ma5"].iloc[i]) and close_arr[i] < result["ma5"].iloc[i])
-                # Top signals (only if we have daily_return)
-                dr = result["daily_return"].iloc[i] if not pd.isna(result["daily_return"].iloc[i]) else 0
-                stall = (result["volume"].iloc[i] >= result["volume"].rolling(20).max().iloc[i] and
-                         -0.02 < dr < 0.02)
-                big_drop = dr < -0.05 and result["volume"].iloc[i] > result["volume"].iloc[i-1] if i > 0 else False
-                deviation_ok = (ma20_val > 0 and
-                                (close_arr[i] - ma20_val) / ma20_val > float(params.get("top_deviation_pct", 30.0)) / 100.0)
-
-                should_sell = (stop_hit or ma_stop or time1 or time2 or
-                              trail_cost or trail_ma5 or stall or big_drop or deviation_ok)
-
-                if should_sell:
-                    sell_signals_arr[i] = True
-                    in_pos = 0
-                    entry_price_val = np.nan
-                    highest_val = np.nan
-                    days_in_pos = 0
-
-            # ── Check buy entry ──
-            if buy_signals_arr[i] and in_pos == 0:
-                in_pos = 1
-                entry_price_val = close_arr[i]
-                highest_val = close_arr[i]
-                days_in_pos = 0
-            elif in_pos == 1:
-                days_in_pos += 1
-                if high_arr[i] > highest_val:
-                    highest_val = high_arr[i]
-=======
             close_i = float(result["close"].iloc[i])
             high_i = float(result["high"].iloc[i])
             ma5_i = result["ma5"].iloc[i]
@@ -592,98 +530,10 @@ class StrategyEngine:
                     highest_val = np.nan
                     days_in_pos = 0
                 continue
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
-            in_position_arr[i] = in_pos
-            if in_pos == 1:
-<<<<<<< HEAD
-                entry_price_arr[i] = entry_price_val
-                highest_arr[i] = highest_val
-                days_in_trade_arr[i] = days_in_pos
+            # flat (not in position after this bar): leave sell/position cols as initialized
 
-        result["in_position"] = in_position_arr
-        result["entry_price"] = entry_price_arr
-        result["highest_since_entry"] = highest_arr
-        result["days_in_trade"] = days_in_trade_arr
-
-        result["profit_pct"] = 0.0
-        mask_pos = result["in_position"] == 1
-        result.loc[mask_pos, "profit_pct"] = (
-            (result.loc[mask_pos, "close"] - result.loc[mask_pos, "entry_price"])
-            / result.loc[mask_pos, "entry_price"]
-        )
-
-        # 规则9：硬性止损
-        result["stop_loss_hit"] = (
-            (result["in_position"] == 1) &
-            (result["close"] < result["entry_price"] * (1 - stop_loss))
-        )
-
-        # 技术止损：收盘价跌破20日均线超过2%
-        result["ma_stop_hit"] = (
-            (result["in_position"] == 1) &
-            (result["close"] < result["ma20"] * (1 - ma_stop_buf))
-        )
-
-        time_stop_d1 = int(params.get("time_stop_days_1", 5))
-        time_stop_d2 = int(params.get("time_stop_days_2", 8))
-        time_profit_1 = float(params.get("time_stop_profit_1", 3.0)) / 100.0
-
-        result["time_stop_1"] = (
-            (result["in_position"] == 1) &
-            (result["days_in_trade"] >= time_stop_d1) &
-            (result["profit_pct"] < time_profit_1)
-        )
-        result["time_stop_2"] = (
-            (result["in_position"] == 1) &
-            (result["days_in_trade"] >= time_stop_d2) &
-            (result["close"] < result["highest_since_entry"])
-        )
-
-        # 规则11：移动止盈
-        result["trail_stop_cost"] = (
-            (result["in_position"] == 1) &
-            (result["highest_since_entry"] > result["entry_price"] * (1 + trail_1)) &
-            (result["close"] < result["entry_price"])
-        )
-        result["trail_stop_ma5"] = (
-            (result["in_position"] == 1) &
-            (result["highest_since_entry"] > result["entry_price"] * (1 + trail_2)) &
-            (result["close"] < result["ma5"])
-        )
-
-        # 规则12：见顶信号
-        result["vol_20d_high"] = result["volume"].rolling(20).max()
-        result["top_stall"] = (
-            (result["in_position"] == 1) &
-            (result["volume"] >= result["vol_20d_high"]) &
-            (result["daily_return"] < 0.02) &  # 放量滞涨
-            (result["daily_return"] > -0.02)
-        )
-        result["top_big_drop"] = (
-            (result["in_position"] == 1) &
-            (result["daily_return"] < -0.05) &   # 长阴
-            (result["volume"] > result["volume"].shift(1))  # 放量
-        )
-        deviation = float(params.get("top_deviation_pct", 30.0)) / 100.0
-        result["top_deviation"] = (
-            (result["in_position"] == 1) &
-            ((result["close"] - result["ma20"]) / result["ma20"] > deviation)
-        )
-
-        result["sell_signal"] = sell_signals_arr
-=======
-                result.loc[result.index[i], "entry_price"] = entry_price_val
-                result.loc[result.index[i], "entry_idx"] = entry_idx_val
-                result.loc[result.index[i], "highest_since_entry"] = highest_val
-                result.loc[result.index[i], "days_in_trade"] = days_in_pos
-                if entry_price_val and not np.isnan(entry_price_val):
-                    result.loc[result.index[i], "profit_pct"] = (
-                        (close_i - entry_price_val) / entry_price_val
-                    )
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
-
-        # ── 信号强度 ──
+        # ── 信号强度（买入）──
         result["signal_strength"] = 0.0
         buy_strength = (
             result["buy_signal"].astype(float) *
@@ -693,28 +543,13 @@ class StrategyEngine:
         buy_strength = buy_strength.clip(0, 1.0)
         result.loc[result["buy_signal"], "signal_strength"] = buy_strength[result["buy_signal"]]
 
-<<<<<<< HEAD
-        # 卖出信号强度：基于止损紧急程度（用向量化赋值）
-        # 重建单独的卖出条件列供通知使用
-        mask_pos = result["in_position"] == 1
-        result["stop_loss_hit"] = mask_pos & (result["close"] < result["entry_price"] * (1 - stop_loss))
-        result["ma_stop_hit"] = mask_pos & (result["close"] < result["ma20"] * (1 - ma_stop_buf))
-        result["trail_stop_ma5"] = mask_pos & (result["highest_since_entry"] > result["entry_price"] * (1 + trail_2)) & (result["close"] < result["ma5"])
-        result["trail_stop_cost"] = mask_pos & (result["highest_since_entry"] > result["entry_price"] * (1 + trail_1)) & (result["close"] < result["entry_price"])
-        result["top_big_drop"] = mask_pos & (result["daily_return"] < -0.05) & (result["volume"] > result["volume"].shift(1))
-        result["top_stall"] = mask_pos & (result["volume"] >= result["vol_20d_high"]) & (result["daily_return"] < 0.02) & (result["daily_return"] > -0.02)
-
-        # 信号强度
-=======
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+        # 卖出信号强度：基于止损紧急程度
         result.loc[result["stop_loss_hit"], "signal_strength"] = -1.0
         result.loc[result["ma_stop_hit"], "signal_strength"] = -0.9
         result.loc[result["top_big_drop"], "signal_strength"] = -1.0
         result.loc[result["top_stall"], "signal_strength"] = -0.7
         result.loc[result["trail_stop_ma5"], "signal_strength"] = -0.6
         result.loc[result["trail_stop_cost"], "signal_strength"] = -0.5
-        # time_stop_1 and time_stop_2 and top_deviation are captured in sell_signal but harder to
-        # vectorize cleanly; use sell_signal for signal strength where others didn't match
         remaining_sells = result["sell_signal"] & (result["signal_strength"] == 0)
         result.loc[remaining_sells, "signal_strength"] = -0.5
 
@@ -818,24 +653,6 @@ class StrategyEngine:
         )
         result["below_ma60"] = result["close"] < result["ma60"]
 
-<<<<<<< HEAD
-        # ATR 移动止损：追踪最高价，回撤超过 N * ATR 时卖出
-        result["highest_since_entry"] = result["high"].expanding().max()
-        result["trailing_stop_price"] = result["highest_since_entry"] - atr_mult * result["atr"]
-        result["atr_stop_hit"] = result["close"] < result["trailing_stop_price"]
-
-        # 百分比移动止损
-        result["trailing_pct_stop"] = (
-            result["close"] < result["high"].rolling(20).max() * (1 - trailing_stop)
-        )
-
-        result["sell_signal"] = (
-            result["ma_dead_cross"] |
-            (result["below_ma60"] & result["adx_fading"]) |
-            result["atr_stop_hit"] |
-            result["trailing_pct_stop"]
-        )
-=======
         result["sell_signal"] = False
         result["atr_stop_hit"] = False
         result["pct_trail_hit"] = False
@@ -867,7 +684,6 @@ class StrategyEngine:
             if sell:
                 in_pos = 0
                 highest = np.nan
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
 
         # ── 信号强度 ──
         result["signal_strength"] = 0.0

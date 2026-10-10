@@ -61,28 +61,27 @@ manager = ConnectionManager()
 
 
 @app.websocket("/ws/market")
-<<<<<<< HEAD
 async def websocket_market(websocket: WebSocket, token: str = "", symbols: str = ""):
     """WebSocket market data stream — user-configurable symbol list.
 
     Usage:
       /ws/market?token=<jwt>&symbols=000001.SZ,600519.SH,300750.SZ
-      /ws/market?symbols=000001.SZ          (no auth, single symbol)
+      /ws/market?symbols=000001.SZ          (DEBUG only without token)
       /ws/market                            (default: top 5 major indices)
 
     With token: subscribes to user's active strategy symbols automatically.
-    Without token: uses explicit symbols param or defaults.
+    Without token: uses explicit symbols param or defaults (DEBUG only).
     """
-=======
-async def websocket_market(websocket: WebSocket):
     # Require token outside DEBUG to avoid anonymous quote scraping
     if not settings.DEBUG:
-        token = websocket.query_params.get("token") or ""
-        payload = decode_access_token(token) if token else None
+        auth_token = token or websocket.query_params.get("token") or ""
+        payload = decode_access_token(auth_token) if auth_token else None
         if not payload:
             await websocket.close(code=4001, reason="Unauthorized")
             return
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+        if not token:
+            token = auth_token
+
     await manager.connect(websocket)
 
     # Determine subscription list
@@ -126,9 +125,15 @@ async def websocket_market(websocket: WebSocket):
     print(f"[WebSocket] Market stream started: {len(symbol_list)} symbols")
     try:
         while True:
-<<<<<<< HEAD
-            loop = asyncio.get_running_loop()
-            quotes_map = await loop.run_in_executor(None, data_engine.batch_get_quotes, symbol_list)
+            try:
+                # Prefer batch_get_quotes; fall back to get_realtime_quotes_batch
+                fetch_fn = getattr(data_engine, "batch_get_quotes", None) or getattr(
+                    data_engine, "get_realtime_quotes_batch", None
+                )
+                quotes_map = await asyncio.to_thread(fetch_fn, symbol_list) if fetch_fn else {}
+                quotes_map = quotes_map or {}
+            except Exception:
+                quotes_map = {}
             for symbol in symbol_list:
                 quote = quotes_map.get(symbol)
                 if quote:
@@ -136,18 +141,6 @@ async def websocket_market(websocket: WebSocket):
                         "type": "quote", "data": quote, "timestamp": datetime.now().isoformat()
                     })
                 else:
-=======
-            symbols = ["000001.SZ", "600519.SH", "000333.SZ", "300750.SZ", "601318.SH"]
-            try:
-                quote_map = await asyncio.to_thread(
-                    data_engine.get_realtime_quotes_batch, symbols
-                ) or {}
-            except Exception:
-                quote_map = {}
-            for symbol in symbols:
-                quote = quote_map.get(symbol)
-                if not quote:
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
                     await websocket.send_json({
                         "type": "quote",
                         "data": {
@@ -158,17 +151,7 @@ async def websocket_market(websocket: WebSocket):
                         },
                         "timestamp": datetime.now().isoformat(),
                     })
-<<<<<<< HEAD
             await asyncio.sleep(2)
-=======
-                else:
-                    await websocket.send_json({
-                        "type": "quote",
-                        "data": quote,
-                        "timestamp": datetime.now().isoformat(),
-                    })
-            await asyncio.sleep(5)
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
@@ -196,38 +179,23 @@ async def websocket_notifications(websocket: WebSocket, token: str = ""):
 
     username = payload.get("sub")
     if not username:
-<<<<<<< HEAD
-        await websocket.close(code=4001, reason="Invalid token payload")
-        return
-
-    # JWT sub is username; notification_engine keys connections by integer user_id
-=======
         await websocket.send_json({"type": "error", "data": {"message": "Invalid token payload"}})
         await websocket.close(code=4001, reason="Invalid token payload")
         return
 
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
+    # JWT sub is username; notification_engine keys connections by integer user_id
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.username == username).first()
     finally:
         db.close()
 
-<<<<<<< HEAD
-    if not user:
-=======
     if not user or not user.is_active:
         await websocket.send_json({"type": "error", "data": {"message": "User not found or inactive"}})
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         await websocket.close(code=4001, reason="User not found")
         return
 
     user_id = user.id
-<<<<<<< HEAD
-
-    await websocket.accept()
-=======
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     await notification_engine.connect(user_id, websocket)
     try:
         # Send a welcome message
@@ -445,15 +413,10 @@ async def startup():
 
     _init_database()
 
-    # Initialize broker connection
-    try:
-        from app.brokers import init_broker
-        from app.core.config import settings
-        broker_type = getattr(settings, "BROKER_TYPE", "paper")
-        await init_broker(broker_type)
-    except Exception as e:
-        print(f"[Startup] Broker init skipped (paper mode fallback): {e}")
+    # Live/paper brokers are resolved lazily via app.engine.broker (trading_engine).
+    # Do not init a parallel app.brokers instance — it was never wired to order flow.
 
+    notification_engine.bind_loop(asyncio.get_running_loop())
     asyncio.create_task(strategy_executor.startup())
     asyncio.create_task(_order_maintenance_loop())
     asyncio.create_task(_market_warmup_loop())
@@ -463,14 +426,6 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await strategy_executor.shutdown()
-
-    # Disconnect broker
-    try:
-        from app.brokers import get_broker
-        await get_broker().disconnect()
-    except Exception:
-        pass
-
     print("[Shutdown] Server stopped")
 
 

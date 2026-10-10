@@ -121,7 +121,6 @@ async def get_top_sector_stocks(
         if top_sectors is None:
             return {"data": [], "message": "当前无符合条件的多头板块"}
 
-<<<<<<< HEAD
         from app.engine.data_engine import data_engine
 
         all_stocks = []
@@ -161,8 +160,6 @@ async def get_top_sector_stocks(
 
         scored.sort(key=lambda x: x["_score"], reverse=True)
 
-=======
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
         return {
             "data": scored,
             "total": len(scored),
@@ -179,102 +176,6 @@ async def get_top_sector_stocks(
         raise HTTPException(status_code=500, detail=f"选股失败: {e}")
 
 
-<<<<<<< HEAD
-def _quote_to_screening(stock: dict) -> dict:
-    """Build a display dict from quote data (no heavy screening)."""
-    return {
-        "symbol": stock["code"],
-        "name": stock.get("name", stock["code"]),
-        "current_price": stock.get("price", 0),
-        "change_pct": stock.get("change_pct", 0),
-        "criteria_met": None,
-        "buy_signal": False,
-    }
-
-
-def _safe_screen_symbol(sym: str, quote: dict | None = None, timeout: float = 10.0) -> dict:
-    """Screen one symbol with timeout; fall back to quote data on failure."""
-    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-
-    try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(stock_screener.check_criteria, sym)
-            return future.result(timeout=timeout)
-    except (FuturesTimeout, Exception):
-        result = stock_screener._empty_result(sym, "筛选超时")
-        if quote:
-            result["name"] = quote.get("name", sym)
-            result["current_price"] = quote.get("price", 0)
-        return result
-
-
-@router.get("/{sector_code}/stocks")
-def get_sector_stocks(
-    sector_code: str,
-    sector_name: str | None = Query(None, description="板块名称（可选，加快查询）"),
-    screened: bool = Query(True, description="是否应用个股筛选条件"),
-    limit: int = Query(30, ge=10, le=100),
-):
-    """Get stocks within a sector, optionally screened for quality."""
-    from app.engine.data_engine import data_engine
-    from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
-
-    try:
-        if not sector_name:
-            ranking = sector_engine.rank_sectors()
-            sector_info = next((s for s in ranking if s["sector_code"] == sector_code), None)
-            sector_name = sector_info["sector_name"] if sector_info else None
-
-        stocks = data_engine.get_sector_stocks(
-            sector_code, count=limit, sector_name=sector_name,
-        )
-        if not stocks:
-            return {"data": [], "message": "板块成分股获取失败，请稍后重试"}
-
-        if not screened:
-            return {
-                "data": [_quote_to_screening(s) for s in stocks],
-                "total": len(stocks),
-                "screened": False,
-                "message": f"共 {len(stocks)} 只成分股",
-            }
-
-        # Screen at most `limit` stocks with per-symbol timeout (avoid 60s+ hangs)
-        quote_map = {s["code"]: s for s in stocks}
-        symbols = [s["code"] for s in stocks[:limit]]
-        screened_results = []
-
-        with ThreadPoolExecutor(max_workers=6) as executor:
-            futures = {
-                executor.submit(_safe_screen_symbol, sym, quote_map.get(sym)): sym
-                for sym in symbols
-            }
-            try:
-                for future in as_completed(futures, timeout=75):
-                    try:
-                        screened_results.append(future.result())
-                    except Exception:
-                        sym = futures[future]
-                        screened_results.append(_safe_screen_symbol(sym, quote_map.get(sym), timeout=0.1))
-            except FuturesTimeout:
-                for future, sym in futures.items():
-                    if not future.done():
-                        future.cancel()
-                        screened_results.append(_safe_screen_symbol(sym, quote_map.get(sym), timeout=0.1))
-
-        screened_results.sort(
-            key=lambda x: (x.get("criteria_met", False), x.get("buy_signal", False)),
-            reverse=True,
-        )
-        passed = sum(1 for s in screened_results if s.get("criteria_met"))
-        return {
-            "data": screened_results,
-            "total": len(screened_results),
-            "passed": passed,
-            "screened": True,
-            "message": f"共 {len(screened_results)} 只，达标 {passed} 只",
-        }
-=======
 @router.get("/{sector_code}/stocks")
 async def get_sector_stocks(
     sector_code: str,
@@ -325,6 +226,5 @@ async def get_sector_stocks(
             }
 
         return await asyncio.to_thread(_run)
->>>>>>> 4b5774d (feat: add stock recommend, insight popup, and trading UX upgrades)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"获取板块成分股失败: {e}")
